@@ -1,0 +1,9 @@
+node_modules/
+npm-debug.log
+dist/
+.env
+backend/serviceAccountKey.json
+.vscode/
+.DS_Store
+backend/serviceAccountKey.json
+.env
