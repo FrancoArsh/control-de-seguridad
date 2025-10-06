@@ -4,47 +4,191 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Escáner QR - Demo</title>
+
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-  <script src="https://unpkg.com/html5-qrcode"></script>
+
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/minified/html5-qrcode.min.js"></script>
+
   <style>
-    body { padding: 1.25rem; }
-    #status { font-weight: 600; margin-top: 1rem; }
+    body { padding: 1.25rem; background: #0b1220; color: #e6eef8; }
+    .card { border-radius: 12px; box-shadow: 0 6px 20px rgba(0,0,0,0.6); }
+    #reader { width: 360px; max-width:100%; margin: auto; }
+    #status { font-weight: 700; margin-top: 1rem; }
+    .led {
+      width: 24px; height: 24px; border-radius: 50%;
+      display:inline-block; margin-right: 8px; vertical-align: middle;
+      box-shadow: 0 0 6px rgba(0,0,0,0.5);
+      background: #444;
+    }
+    .led.green { background: #2ecc71; box-shadow: 0 0 16px rgba(46,204,113,0.8); }
+    .led.red { background: #e74c3c; box-shadow: 0 0 16px rgba(231,76,60,0.8); }
+    .led.off { background: #444; box-shadow: none; }
+    #manual { margin-top: 1rem; }
+    .small-muted { color: #9fb0c8; font-size: .9rem; }
+    .busy { opacity: 0.6; pointer-events: none; }
   </style>
 </head>
 <body>
-  <h3>Escáner QR - Prueba</h3>
-  <div id="reader" style="width: 360px; max-width:100%"></div>
-  <div id="status" class="alert alert-info">Esperando escaneo...</div>
+  <div class="container">
+    <div class="card p-3 mt-4">
+      <h4>Escáner QR — Demo</h4>
+      <p class="small-muted">Escanea un token QR. El servidor valida y se muestra luz verde/roja.</p>
+
+      <div id="reader" class="my-2"></div>
+
+      <div id="status" class="alert alert-secondary">Esperando escaneo...</div>
+
+      <div class="d-flex align-items-center my-2">
+        <span id="led" class="led off" title="Estado del totem"></span>
+        <div>
+          <div id="statusText">Estado: esperando</div>
+          <div class="small-muted" id="subText">sin actividad</div>
+        </div>
+      </div>
+
+      <div id="manual" class="mt-3">
+        <label for="manualToken" class="form-label small-muted">Entrada manual (token):</label>
+        <div class="input-group">
+          <input id="manualToken" class="form-control" placeholder="pega token aquí" />
+          <button id="manualBtn" class="btn btn-primary">Enviar</button>
+        </div>
+      </div>
+
+      <hr />
+      <div class="small-muted">Notas: si el servidor está en otro host, actualiza la variable BACKEND_URL en el script.</div>
+    </div>
+  </div>
 
   <script>
-    const BACKEND = 'http://localhost:3000';
+    // CONFIG: apunta a tu backend (en producción pon la URL pública)
+    const BACKEND_URL = "http://localhost:3000";
+    // --- Configs ---
+    const SCAN_DEBOUNCE_MS = 1200;      // evita envíos repetidos por lecturas rápidas
+    const RETRY_ATTEMPTS = 3;           // reintentos en caso de falla de red
+    const RETRY_DELAY_MS = 800;         // intervalo entre reintentos
 
-    function onScanSuccess(decodedText) {
-      document.getElementById('status').className = 'alert alert-warning';
-      document.getElementById('status').innerText = 'Validando token...';
+    // Estado
+    let lastScan = 0;
+    let processing = false;
 
-      fetch(`${BACKEND}/validate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: decodedText, sessionId: 'sala-101' })
-      })
-      .then(r => r.json())
-      .then(data => {
-        if (data.ok) {
-          document.getElementById('status').className = 'alert alert-success';
-          document.getElementById('status').innerText = '✔ Acceso autorizado';
-        } else {
-          document.getElementById('status').className = 'alert alert-danger';
-          document.getElementById('status').innerText = '✖ Error: ' + (data.error || 'desconocido');
-        }
-      }).catch(() => {
-        document.getElementById('status').className = 'alert alert-danger';
-        document.getElementById('status').innerText = 'Error de conexión al servidor';
-      });
+    const statusEl = document.getElementById('status');
+    const statusText = document.getElementById('statusText');
+    const subText = document.getElementById('subText');
+    const ledEl = document.getElementById('led');
+
+    function setStatus(kind, main, sub = '') {
+      // kind: info, success, error, warning
+      statusEl.className = 'alert';
+      switch(kind){
+        case 'success':
+          statusEl.classList.add('alert-success');
+          break;
+        case 'error':
+          statusEl.classList.add('alert-danger');
+          break;
+        case 'warning':
+          statusEl.classList.add('alert-warning');
+          break;
+        default:
+          statusEl.classList.add('alert-secondary');
+      }
+      statusEl.innerText = main;
+      statusText.innerText = 'Estado: ' + main;
+      subText.innerText = sub;
     }
 
-    const html5QrcodeScanner = new Html5QrcodeScanner("reader", { fps: 10, qrbox: 250 });
-    html5QrcodeScanner.render(onScanSuccess);
+    function setLed(color) {
+      ledEl.classList.remove('green','red','off');
+      if (color === 'green') ledEl.classList.add('green');
+      else if (color === 'red') ledEl.classList.add('red');
+      else ledEl.classList.add('off');
+    }
+
+    async function validateToken(token, sessionId = 'sala-101') {
+      if (processing) return; // evita doble envío
+      const now = Date.now();
+      if (now - lastScan < SCAN_DEBOUNCE_MS) return;
+      lastScan = now;
+      processing = true;
+      document.body.classList.add('busy');
+      setStatus('warning', 'Validando token...', 'contactando servidor');
+
+      // reintentos simples
+      for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
+        try {
+          const resp = await fetch(`${BACKEND_URL}/validate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token, sessionId, type: 'entry' }),
+            cache: 'no-store'
+          });
+          const data = await resp.json();
+          if (resp.ok && data.ok) {
+            setStatus('success', '✔ Acceso autorizado', `Alumno: ${data.studentUid}`);
+            setLed('green');
+            processing = false;
+            document.body.classList.remove('busy');
+            return data;
+          } else {
+            // mostrar mensaje específico del backend
+            const msg = data && data.error ? data.error : 'Acceso denegado';
+            setStatus('error', '✖ Acceso denegado', msg);
+            setLed('red');
+            processing = false;
+            document.body.classList.remove('busy');
+            return data;
+          }
+        } catch (err) {
+          // error de red -> reintentar
+          console.warn('Intento', attempt, 'falló:', err.message || err);
+          if (attempt === RETRY_ATTEMPTS) {
+            setStatus('error', 'Error de conexión', 'Verifica servidor o red');
+            setLed('red');
+            processing = false;
+            document.body.classList.remove('busy');
+            return { ok: false, error: 'network' };
+          }
+          await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+        }
+      }
+    }
+
+    // HTML5 QR scanner
+    const html5QrcodeScanner = new Html5Qrcode("reader");
+    const config = { fps: 10, qrbox: 250, experimentalFeatures: { useBarCodeDetectorIfSupported: true } };
+
+    function onScanSuccess(decodedText, decodedResult) {
+      // decodedText es el token -> enviamos para validar
+      validateToken(decodedText);
+    }
+
+    function onScanFailure(error) {
+      // No mostramos warnings por cada lectura fallida (ruido)
+      // console.log('scan failure', error);
+    }
+
+    // arrancar cámara con permisos
+    Html5Qrcode.getCameras().then(cameras => {
+      const camId = (cameras && cameras.length) ? cameras[0].id : null;
+      if (camId) html5QrcodeScanner.start(camId, config, onScanSuccess, onScanFailure)
+        .catch(err => setStatus('error','No se pudo iniciar cámara', String(err)));
+      else setStatus('error','Cámara no detectada','Revisa permisos o prueba con Live Server en otro equipo');
+    }).catch(err => setStatus('error','Error al listar cámaras', String(err)));
+
+    // Manual input
+    document.getElementById('manualBtn').addEventListener('click', () => {
+      const token = document.getElementById('manualToken').value.trim();
+      if (!token) return setStatus('warning','Token vacío','Ingresa un token o escanea QR');
+      validateToken(token);
+    });
+
+    // Limpiar LED después de X segundos para permitir siguiente prueba
+    setInterval(() => {
+      setLed('off');
+      setStatus('info','Esperando escaneo...','');
+    }, 7000);
+
   </script>
 </body>
 </html>
+
