@@ -95,3 +95,39 @@ app.post("/validate", async (req, res) => {
     return res.status(500).json({ ok: false, error: "server error" });
   }
 });
+// --- Nuevo endpoint /verify ---
+// Este endpoint comprueba si el estudiante con cierto ID y token tiene acceso autorizado
+app.post("/verify", async (req, res) => {
+  try {
+    const { id, token } = req.body;
+
+    if (!id || !token) {
+      return res.status(400).json({ authorized: false, message: "Faltan datos: id o token" });
+    }
+
+    const studentRef = db.ref(`tokens/${id}`);
+    const snapshot = await studentRef.once("value");
+    const tokenData = snapshot.val();
+
+    if (!tokenData) {
+      return res.status(404).json({ authorized: false, message: "ID no encontrado" });
+    }
+
+    // Verificar token y expiración
+    if (tokenData.token === token && tokenData.expiresAt > Date.now()) {
+      return res.json({ authorized: true, message: "Acceso autorizado" });
+    } else {
+      return res.json({ authorized: false, message: "Token inválido o expirado" });
+    }
+
+  } catch (error) {
+    console.error("Error en /verify:", error);
+    return res.status(500).json({ authorized: false, message: "Error interno del servidor" });
+  }
+});
+
+// --- Inicio del servidor ---
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Servidor corriendo en puerto ${PORT}`);
+});
