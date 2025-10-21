@@ -1,7 +1,0 @@
-{
-  "dependencies": {
-    "csvtojson": "^2.0.10",
-    "firebase-admin": "^13.5.0",
-    "qrcode": "^1.5.4"
-  }
-}
