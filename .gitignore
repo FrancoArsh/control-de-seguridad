@@ -6,4 +6,4 @@ backend/serviceAccountKey.json
 .vscode/
 .DS_Store
 backend/serviceAccountKey.json
-.env
+.gitignore/

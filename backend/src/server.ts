@@ -105,19 +105,35 @@ app.post("/verify", async (req, res) => {
       return res.status(400).json({ authorized: false, message: "Faltan datos: id o token" });
     }
 
-    const studentRef = db.ref(`tokens/${id}`);
+    const studentRef = db.ref(`accessTokens/${id}`);
     const snapshot = await studentRef.once("value");
-    const tokenData = snapshot.val();
 
-    if (!tokenData) {
+    if (!snapshot.exists()) {
       return res.status(404).json({ authorized: false, message: "ID no encontrado" });
     }
 
-    // Verificar token y expiración
-    if (tokenData.token === token && tokenData.expiresAt > Date.now()) {
+    const tokenData = snapshot.val();
+
+    // Aseguramos tipos
+    const dbToken = String(tokenData.token || "");
+    const expiresAt = parseInt(tokenData.expiresAt, 10);
+    const now = Date.now();
+
+    if (isNaN(expiresAt)) {
+    console.warn(`⚠️ El campo expiresAt no es un número válido para ${id}:`, tokenData.expiresAt);
+      return res.json({ authorized: false, message: "Formato inválido de expiración" });
+    }
+
+
+    if (dbToken === token && expiresAt > now) {
+      console.log(`✅ Acceso autorizado para ${id}`);
       return res.json({ authorized: true, message: "Acceso autorizado" });
+    } else if (dbToken !== token) {
+      console.log(`❌ Token incorrecto para ${id}`);
+      return res.json({ authorized: false, message: "Token incorrecto" });
     } else {
-      return res.json({ authorized: false, message: "Token inválido o expirado" });
+      console.log(`⏰ Token expirado para ${id}`);
+      return res.json({ authorized: false, message: "Token expirado" });
     }
 
   } catch (error) {
@@ -125,7 +141,6 @@ app.post("/verify", async (req, res) => {
     return res.status(500).json({ authorized: false, message: "Error interno del servidor" });
   }
 });
-
 // --- Inicio del servidor ---
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
