@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Escáner QR - Demo</title>
+  <title>Escáner QR - Demo Control de Seguridad</title>
 
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 
@@ -28,18 +28,19 @@
     .busy { opacity: 0.6; pointer-events: none; }
   </style>
 </head>
+
 <body>
   <div class="container">
     <div class="card p-3 mt-4">
-      <h4>Escáner QR — Demo</h4>
-      <p class="small-muted">Escanea un token QR. El servidor valida y se muestra luz verde/roja.</p>
+      <h4>Escáner QR — Demo Control de Seguridad</h4>
+      <p class="small-muted">Escanea un código QR o ingresa un token manualmente. El sistema verificará la autorización en Firebase.</p>
 
       <div id="reader" class="my-2"></div>
 
       <div id="status" class="alert alert-secondary">Esperando escaneo...</div>
 
       <div class="d-flex align-items-center my-2">
-        <span id="led" class="led off" title="Estado del totem"></span>
+        <span id="led" class="led off" title="Estado del acceso"></span>
         <div>
           <div id="statusText">Estado: esperando</div>
           <div class="small-muted" id="subText">sin actividad</div>
@@ -47,148 +48,145 @@
       </div>
 
       <div id="manual" class="mt-3">
-        <label for="manualToken" class="form-label small-muted">Entrada manual (token):</label>
+        <label for="manualToken" class="form-label small-muted">Entrada manual (token o JSON):</label>
         <div class="input-group">
-          <input id="manualToken" class="form-control" placeholder="pega token aquí" />
+          <input id="manualToken" class="form-control" placeholder='Ej: {"id":"est-001","token":"abc123"} o solo el token' />
           <button id="manualBtn" class="btn btn-primary">Enviar</button>
         </div>
       </div>
 
       <hr />
-      <div class="small-muted">Notas: si el servidor está en otro host, actualiza la variable BACKEND_URL en el script.</div>
+      <div class="small-muted">Notas: Si el servidor está en otra máquina, actualiza la variable <b>BACKEND_URL</b> en el script.</div>
     </div>
   </div>
 
-  <script>
-    // CONFIG: apunta a tu backend (en producción pon la URL pública)
-    const BACKEND_URL = "http://localhost:3000";
-    // --- Configs ---
-    const SCAN_DEBOUNCE_MS = 1200;      // evita envíos repetidos por lecturas rápidas
-    const RETRY_ATTEMPTS = 3;           // reintentos en caso de falla de red
-    const RETRY_DELAY_MS = 800;         // intervalo entre reintentos
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+  console.log("✅ DOM completamente cargado");
 
-    // Estado
-    let lastScan = 0;
-    let processing = false;
+  // === CONFIGURACIÓN ===
+  const BACKEND_URL = "http://localhost:3000"; // Ajusta si usas otro host o puerto
+  const SCAN_DEBOUNCE_MS = 1200;
+  const RETRY_ATTEMPTS = 3;
+  const RETRY_DELAY_MS = 800;
 
-    const statusEl = document.getElementById('status');
-    const statusText = document.getElementById('statusText');
-    const subText = document.getElementById('subText');
-    const ledEl = document.getElementById('led');
+  let lastScan = 0;
+  let processing = false;
 
-    function setStatus(kind, main, sub = '') {
-      // kind: info, success, error, warning
-      statusEl.className = 'alert';
-      switch(kind){
-        case 'success':
-          statusEl.classList.add('alert-success');
-          break;
-        case 'error':
-          statusEl.classList.add('alert-danger');
-          break;
-        case 'warning':
-          statusEl.classList.add('alert-warning');
-          break;
-        default:
-          statusEl.classList.add('alert-secondary');
-      }
-      statusEl.innerText = main;
-      statusText.innerText = 'Estado: ' + main;
-      subText.innerText = sub;
+  const statusEl = document.getElementById('status');
+  const statusText = document.getElementById('statusText');
+  const subText = document.getElementById('subText');
+  const ledEl = document.getElementById('led');
+  const manualBtn = document.getElementById('manualBtn');
+  const manualInput = document.getElementById('manualToken');
+
+  if (!manualBtn) {
+    console.error("❌ No se encontró el botón manualBtn en el DOM");
+    return;
+  } else {
+    console.log("✅ Botón manualBtn detectado correctamente");
+  }
+
+  // === FUNCIONES DE INTERFAZ ===
+  function setStatus(kind, main, sub = '') {
+    statusEl.className = 'alert';
+    switch(kind){
+      case 'success': statusEl.classList.add('alert-success'); break;
+      case 'error':   statusEl.classList.add('alert-danger');  break;
+      case 'warning': statusEl.classList.add('alert-warning'); break;
+      default:        statusEl.classList.add('alert-secondary');
+    }
+    statusEl.innerText = main;
+    statusText.innerText = 'Estado: ' + main;
+    subText.innerText = sub;
+  }
+
+  function setLed(color) {
+    ledEl.classList.remove('green','red','off');
+    if (color === 'green') ledEl.classList.add('green');
+    else if (color === 'red') ledEl.classList.add('red');
+    else ledEl.classList.add('off');
+  }
+
+  // === LÓGICA QR Y ENVÍO ===
+  function parseQrPayload(decodedText) {
+    try {
+      const obj = JSON.parse(decodedText);
+      if (obj && obj.id && obj.token) return { id: String(obj.id), token: String(obj.token) };
+    } catch { /* no es JSON */ }
+    return { token: decodedText };
+  }
+
+  async function sendToBackend(payload) {
+    if (!payload || !payload.token) return { authorized:false, message:'Token vacío' };
+
+    try {
+      const resp = await fetch(`${BACKEND_URL}/verify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: payload.id, token: payload.token }),
+        cache: 'no-store'
+      });
+      return await resp.json();
+    } catch (err) {
+      console.error("Error conectando con backend:", err);
+      return { authorized:false, message:'Error de conexión con backend' };
+    }
+  }
+
+  async function processScanned(decodedText) {
+    console.log("📦 processScanned ejecutado con:", decodedText);
+    const now = Date.now();
+    if (processing || now - lastScan < SCAN_DEBOUNCE_MS) return;
+    lastScan = now;
+    processing = true;
+    document.body.classList.add('busy');
+    setStatus('warning','Validando token...','Conectando al servidor');
+
+    const payload = parseQrPayload(decodedText);
+    const result = await sendToBackend(payload);
+
+    if (result && result.authorized) {
+      setStatus('success','✔ Acceso autorizado', result.message || 'Autorizado');
+      setLed('green');
+    } else {
+      setStatus('error','✖ Acceso denegado', result.message || 'Token incorrecto');
+      setLed('red');
     }
 
-    function setLed(color) {
-      ledEl.classList.remove('green','red','off');
-      if (color === 'green') ledEl.classList.add('green');
-      else if (color === 'red') ledEl.classList.add('red');
-      else ledEl.classList.add('off');
-    }
+    processing = false;
+    document.body.classList.remove('busy');
+  }
 
-    async function validateToken(token, sessionId = 'sala-101') {
-      if (processing) return; // evita doble envío
-      const now = Date.now();
-      if (now - lastScan < SCAN_DEBOUNCE_MS) return;
-      lastScan = now;
-      processing = true;
-      document.body.classList.add('busy');
-      setStatus('warning', 'Validando token...', 'contactando servidor');
+  // === ENTRADA MANUAL ===
+  manualBtn.addEventListener('click', async () => {
+    console.log("👉 Botón manual presionado");
+    const raw = manualInput.value.trim();
+    if (!raw) return setStatus('warning','Token vacío','Ingresa un token o JSON');
+    setStatus('warning','Validando token...','');
+    await processScanned(raw);
+  });
 
-      // reintentos simples
-      for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
-        try {
-          const resp = await fetch(`${BACKEND_URL}/validate`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ token, sessionId, type: 'entry' }),
-            cache: 'no-store'
-          });
-          const data = await resp.json();
-          if (resp.ok && data.ok) {
-            setStatus('success', '✔ Acceso autorizado', `Alumno: ${data.studentUid}`);
-            setLed('green');
-            processing = false;
-            document.body.classList.remove('busy');
-            return data;
-          } else {
-            // mostrar mensaje específico del backend
-            const msg = data && data.error ? data.error : 'Acceso denegado';
-            setStatus('error', '✖ Acceso denegado', msg);
-            setLed('red');
-            processing = false;
-            document.body.classList.remove('busy');
-            return data;
-          }
-        } catch (err) {
-          // error de red -> reintentar
-          console.warn('Intento', attempt, 'falló:', err.message || err);
-          if (attempt === RETRY_ATTEMPTS) {
-            setStatus('error', 'Error de conexión', 'Verifica servidor o red');
-            setLed('red');
-            processing = false;
-            document.body.classList.remove('busy');
-            return { ok: false, error: 'network' };
-          }
-          await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
-        }
-      }
-    }
-
-    // HTML5 QR scanner
-    const html5QrcodeScanner = new Html5Qrcode("reader");
-    const config = { fps: 10, qrbox: 250, experimentalFeatures: { useBarCodeDetectorIfSupported: true } };
-
-    function onScanSuccess(decodedText, decodedResult) {
-      // decodedText es el token -> enviamos para validar
-      validateToken(decodedText);
-    }
-
-    function onScanFailure(error) {
-      // No mostramos warnings por cada lectura fallida (ruido)
-      // console.log('scan failure', error);
-    }
-
-    // arrancar cámara con permisos
+  // === INICIALIZAR ESCÁNER (solo si hay cámara) ===
+  if (window.Html5Qrcode) {
     Html5Qrcode.getCameras().then(cameras => {
-      const camId = (cameras && cameras.length) ? cameras[0].id : null;
-      if (camId) html5QrcodeScanner.start(camId, config, onScanSuccess, onScanFailure)
-        .catch(err => setStatus('error','No se pudo iniciar cámara', String(err)));
-      else setStatus('error','Cámara no detectada','Revisa permisos o prueba con Live Server en otro equipo');
-    }).catch(err => setStatus('error','Error al listar cámaras', String(err)));
+      const camId = cameras.length ? cameras[0].id : null;
+      if (camId) {
+        const qr = new Html5Qrcode("reader");
+        qr.start(camId, { fps:10, qrbox:250 }, text => processScanned(text));
+      } else {
+        console.warn("⚠️ Cámara no detectada");
+      }
+    }).catch(err => console.error("Error iniciando cámara:", err));
+  }
 
-    // Manual input
-    document.getElementById('manualBtn').addEventListener('click', () => {
-      const token = document.getElementById('manualToken').value.trim();
-      if (!token) return setStatus('warning','Token vacío','Ingresa un token o escanea QR');
-      validateToken(token);
-    });
+  // === AUTO RESET ===
+  setInterval(() => {
+    setLed('off');
+    setStatus('info','Esperando escaneo...','');
+  }, 7000);
+});
+</script>
 
-    // Limpiar LED después de X segundos para permitir siguiente prueba
-    setInterval(() => {
-      setLed('off');
-      setStatus('info','Esperando escaneo...','');
-    }, 7000);
-
-  </script>
 </body>
 </html>
-

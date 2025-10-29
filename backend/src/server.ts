@@ -4,6 +4,7 @@ import admin from "firebase-admin";
 import dotenv from "dotenv";
 import fs from "fs";
 import path from "path";
+import cors from "cors";
 
 dotenv.config();
 
@@ -30,6 +31,7 @@ if (serviceAccount) {
 const db = admin.database();
 const app = express();
 app.use(express.json());
+app.use(cors());
 
 // POST /validate
 app.post("/validate", async (req, res) => {
@@ -105,37 +107,24 @@ app.post("/verify", async (req, res) => {
       return res.status(400).json({ authorized: false, message: "Faltan datos: id o token" });
     }
 
+    // Buscar el token del estudiante
     const studentRef = db.ref(`accessTokens/${id}`);
     const snapshot = await studentRef.once("value");
+    const tokenData = snapshot.val();
 
-    if (!snapshot.exists()) {
+    if (!tokenData) {
+      console.log(`❌ ID no encontrado: ${id}`);
       return res.status(404).json({ authorized: false, message: "ID no encontrado" });
     }
 
-    const tokenData = snapshot.val();
-
-    // Aseguramos tipos
-    const dbToken = String(tokenData.token || "");
-    const expiresAt = parseInt(tokenData.expiresAt, 10);
-    const now = Date.now();
-
-    if (isNaN(expiresAt)) {
-    console.warn(`⚠️ El campo expiresAt no es un número válido para ${id}:`, tokenData.expiresAt);
-      return res.json({ authorized: false, message: "Formato inválido de expiración" });
-    }
-
-
-    if (dbToken === token && expiresAt > now) {
+    // Comparar el token guardado con el recibido
+    if (tokenData.token === token) {
       console.log(`✅ Acceso autorizado para ${id}`);
       return res.json({ authorized: true, message: "Acceso autorizado" });
-    } else if (dbToken !== token) {
+    } else {
       console.log(`❌ Token incorrecto para ${id}`);
       return res.json({ authorized: false, message: "Token incorrecto" });
-    } else {
-      console.log(`⏰ Token expirado para ${id}`);
-      return res.json({ authorized: false, message: "Token expirado" });
     }
-
   } catch (error) {
     console.error("Error en /verify:", error);
     return res.status(500).json({ authorized: false, message: "Error interno del servidor" });
