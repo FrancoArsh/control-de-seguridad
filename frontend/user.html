@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Perfil - Usuario</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { background: #0f1724; color: #e6eef8; padding: 1.25rem; }
+    .card { border-radius: 12px; }
+    .qr-img { max-width: 320px; width: 100%; height: auto; background: #fff; padding: 8px; border-radius: 8px; display:block; margin:auto; }
+    .muted { color: #9fb0c8; }
+    .info-row { display:flex; gap:12px; align-items:center; }
+    .small-token { font-family: monospace; }
+    .debugBox { background:#071226; color:#bfe0ff; padding:10px; border-radius:6px; font-family: monospace; font-size:0.85rem; max-height:240px; overflow:auto; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card p-3 mx-auto" style="max-width:880px;">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h4>Perfil de Usuario</h4>
+        <a href="index.html" class="btn btn-sm btn-outline-light">Volver al Totem</a>
+      </div>
+
+      <div id="content">
+        <div class="text-center mb-3">
+          <div id="qrContainer">
+            <div class="muted">Cargando QR...</div>
+          </div>
+        </div>
+
+        <div class="mb-2">
+          <strong>Nombre:</strong> <span id="name">—</span>
+        </div>
+        <div class="mb-2">
+          <strong>ID:</strong> <span id="userid">—</span>
+        </div>
+        <div class="mb-2">
+          <strong>Rol:</strong> <span id="role">—</span>
+        </div>
+        <div class="mb-3">
+          <strong>Token:</strong> <span id="token" class="small-token">—</span>
+        </div>
+
+        <div class="d-flex gap-2 mb-3">
+          <button id="downloadBtn" class="btn btn-primary btn-sm">Descargar QR</button>
+          <button id="copyBtn" class="btn btn-outline-light btn-sm">Copiar ID en portapapeles</button>
+          <button id="refreshBtn" class="btn btn-outline-secondary btn-sm">Actualizar</button>
+        </div>
+
+        <hr />
+        <div class="muted small mt-2">Si no aparece información, verifica que el ID exista en Firebase o que el token esté asignado.</div>
+
+        <hr />
+        <div>
+          <button id="toggleDebug" class="btn btn-sm btn-outline-info">Mostrar debug</button>
+          <div id="debugArea" style="display:none; margin-top:10px;">
+            <div class="debugBox" id="debugJson">Sin datos</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const BACKEND_URL = "http://localhost:3000";
+  const params = new URLSearchParams(location.search);
+  let userId = params.get('id');
+
+  const qrContainer = document.getElementById('qrContainer');
+  const nameEl = document.getElementById('name');
+  const idEl = document.getElementById('userid');
+  const roleEl = document.getElementById('role');
+  const tokenEl = document.getElementById('token');
+  const downloadBtn = document.getElementById('downloadBtn');
+  const copyBtn = document.getElementById('copyBtn');
+  const refreshBtn = document.getElementById('refreshBtn');
+  const debugJson = document.getElementById('debugJson');
+  const toggleDebug = document.getElementById('toggleDebug');
+  const debugArea = document.getElementById('debugArea');
+
+  // Si no hay id en la URL, pedirlo por prompt (útil en pruebas locales)
+  (function ensureId() {
+    if (!userId) {
+      const ask = prompt("Escribe el id del usuario (ej: est-001):");
+      if (ask) {
+        userId = ask.trim();
+        if (userId) {
+          // recargar la página con el parámetro id
+          location.search = '?id=' + encodeURIComponent(userId);
+        } else {
+          qrContainer.innerHTML = `<div class="muted">Debes abrir esta página con ?id=est-001</div>`;
+        }
+      } else {
+        qrContainer.innerHTML = `<div class="muted">Debes abrir esta página con ?id=est-001</div>`;
+      }
+    }
+  })();
+
+  async function fetchUser(id) {
+    try {
+      const res = await fetch(`${BACKEND_URL}/user/${encodeURIComponent(id)}`);
+      const json = await res.json();
+      return json;
+    } catch (e) {
+      console.error("fetchUser error", e);
+      return { ok:false, error:'network', _err:e && e.message };
+    }
+  }
+
+  function setLoading() {
+    qrContainer.innerHTML = `<div class="muted">Cargando QR...</div>`;
+    nameEl.innerText = '—';
+    idEl.innerText = '—';
+    roleEl.innerText = '—';
+    tokenEl.innerText = '—';
+    debugJson.innerText = 'Sin datos';
+  }
+
+  function render(data) {
+    // mostrar objeto crudo en debug
+    debugJson.innerText = JSON.stringify(data, null, 2);
+
+    if (!data || !data.ok) {
+      qrContainer.innerHTML = `<div class="muted">No se encontró usuario o error de conexión.</div>`;
+      nameEl.innerText = data?.name || '—';
+      idEl.innerText = data?.id || (userId || '—');
+      roleEl.innerText = data?.role || '—';
+      tokenEl.innerText = data?.token ? data.token.substring(0,6) + '…' : '—';
+      return;
+    }
+
+    nameEl.innerText = data.name || '—';
+    idEl.innerText = data.id || '—';
+    roleEl.innerText = data.role || '—';
+    tokenEl.innerText = data.token ? (data.token.substring(0,8) + '…' + data.token.slice(-4)) : '—';
+
+    if (data.qrDataUrl) {
+      qrContainer.innerHTML = `<img id="qrImage" class="qr-img" src="${data.qrDataUrl}" alt="QR de ${data.id}" />`;
+    } else {
+      qrContainer.innerHTML = `<div class="muted">No hay QR asignado para este usuario.</div>`;
+    }
+  }
+
+  async function init() {
+    if (!userId) return;
+    setLoading();
+    const data = await fetchUser(userId);
+    render(data);
+  }
+
+  downloadBtn.addEventListener('click', () => {
+    const img = document.getElementById('qrImage');
+    if (!img) return alert("No hay QR disponible para descargar");
+    const a = document.createElement('a');
+    a.href = img.src;
+    a.download = `${userId}_qr.png`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  });
+
+  copyBtn.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(userId || '');
+      alert("ID copiado al portapapeles");
+    } catch (e) {
+      alert("No se pudo copiar: " + (e && e.message));
+    }
+  });
+
+  refreshBtn.addEventListener('click', init);
+
+  toggleDebug.addEventListener('click', () => {
+    if (debugArea.style.display === 'none') {
+      debugArea.style.display = 'block';
+      toggleDebug.innerText = 'Ocultar debug';
+    } else {
+      debugArea.style.display = 'none';
+      toggleDebug.innerText = 'Mostrar debug';
+    }
+  });
+
+  // inicializa (si ya hay id)
+  init();
+</script>
+</body>
+</html>
+

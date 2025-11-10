@@ -5,6 +5,9 @@ import dotenv from "dotenv";
 import fs from "fs";
 import path from "path";
 import cors from "cors";
+import * as QRCode from "qrcode";
+import crypto from "crypto";
+
 
 dotenv.config();
 
@@ -227,6 +230,165 @@ app.get("/history", async (req, res) => {
     return res.json({ ok: true, count: arr.length, data: arr });
   } catch (err) {
     console.error("GET /history error:", err);
+    return res.status(500).json({ ok: false, error: "server error" });
+  }
+});
+
+// GET /user/:id -> devuelve info pública del usuario + qrDataUrl
+app.get("/user/:id", async (req, res) => {
+  try {
+    const id = String(req.params.id || "").trim();
+    if (!id) return res.status(400).json({ ok: false, error: "missing id" });
+
+    // Intentar leer datos desde students/{id}
+    let name: string | null = null;
+    let role: string | null = null;
+    try {
+      const sSnap = await db.ref(`students/${id}`).once("value");
+      if (sSnap.exists()) {
+        const sVal = sSnap.val();
+        name = sVal.name || null;
+        role = sVal.role || null; // si guardas role en students
+      }
+    } catch (e) {
+      console.warn("user/:id -> error reading students:", e);
+    }
+
+    // Intentar leer token desde accessTokens/{id}
+    let token: string | null = null;
+    try {
+      const tSnap = await db.ref(`accessTokens/${id}`).once("value");
+      if (tSnap.exists()) {
+        const tVal = tSnap.val();
+        token = String(tVal.token || "");
+      } else {
+        // fallback: tokens/{id}
+        const alt = await db.ref(`tokens/${id}`).once("value");
+        if (alt.exists()) {
+          token = String(alt.val().token || "");
+        }
+      }
+    } catch (e) {
+      console.warn("user/:id -> error reading tokens:", e);
+    }
+
+    // Construir payload QR: un JSON con id y token (si no hay token, devolverá null)
+    const qrPayload = token ? JSON.stringify({ id, token }) : null;
+
+    // Generar Data URL del QR (si hay payload)
+    let qrDataUrl: string | null = null;
+    if (qrPayload) {
+      try {
+        qrDataUrl = await QRCode.toDataURL(qrPayload, { margin: 1, scale: 8 });
+      } catch (e) {
+        console.warn("user/:id -> error generating QR:", e);
+      }
+    }
+
+    return res.json({
+      ok: true,
+      id,
+      name,
+      role,
+      token: token ? token : null,
+      qrDataUrl
+    });
+  } catch (err) {
+    console.error("GET /user/:id error:", err);
+    return res.status(500).json({ ok: false, error: "server error" });
+  }
+});
+
+// ---------------------------
+// Admin endpoints: GET /users  and POST /users
+// - GET /users -> lista todos los usuarios con token (si existe)
+// - POST /users -> crea o actualiza user. body: { id?, name, role, token?, regenerate? }
+//    if regenerate==true -> crea un token nuevo y actualiza accessTokens/{id}
+//    returns object with qrDataUrl
+// ---------------------------
+
+app.get("/users", async (req, res) => {
+  try {
+    const studentsSnap = await db.ref("students").once("value");
+    const studentsVal = studentsSnap.val() || {};
+
+    // Convertir a array y leer tokens en paralelo
+    const ids = Object.keys(studentsVal);
+    const users = await Promise.all(ids.map(async (id) => {
+      let token = null;
+      try {
+        const tSnap = await db.ref(`accessTokens/${id}`).once("value");
+        if (tSnap.exists()) token = String(tSnap.val().token || null);
+      } catch (e) { /* ignore */ }
+      return {
+        id,
+        name: studentsVal[id].name || null,
+        role: studentsVal[id].role || null,
+        token
+      };
+    }));
+
+    return res.json({ ok: true, count: users.length, data: users });
+  } catch (err) {
+    console.error("GET /users error:", err);
+    return res.status(500).json({ ok: false, error: "server error" });
+  }
+});
+
+app.post("/users", async (req, res) => {
+  try {
+    let { id, name, role, token, regenerate } = req.body || {};
+
+    // Generar id si no viene
+    if (!id || String(id).trim() === "") {
+      // id formato est-XXX
+      id = `est-${Math.floor(Math.random() * 900 + 100)}`;
+    }
+    id = String(id);
+
+    // Guardar/actualizar datos del estudiante
+    await db.ref(`students/${id}`).update({
+      name: name || null,
+      role: role || null
+    });
+
+    // Leer token existente si no se pasó token
+    if (!token) {
+      const existingSnap = await db.ref(`accessTokens/${id}`).once("value");
+      if (existingSnap.exists()) token = String(existingSnap.val().token || null);
+    }
+
+    // Regenerar token si piden o si no hay token
+    if (regenerate === true || !token) {
+      token = crypto.randomBytes(12).toString("hex");
+    }
+
+    // Escribir token en accessTokens/{id}
+    await db.ref(`accessTokens/${id}`).set({
+      token,
+      createdAt: Date.now()
+    });
+
+    // Generar QR data URL con payload {id, token}
+    let qrDataUrl: string | null = null;
+    try {
+      const payload = JSON.stringify({ id, token });
+      qrDataUrl = await QRCode.toDataURL(payload, { margin: 1, scale: 8 });
+    } catch (e) {
+      console.warn("POST /users -> QR generation failed:", e);
+    }
+
+    return res.json({
+      ok: true,
+      id,
+      name: name || null,
+      role: role || null,
+      token,
+      qrDataUrl
+    });
+
+  } catch (err) {
+    console.error("POST /users error:", err);
     return res.status(500).json({ ok: false, error: "server error" });
   }
 });

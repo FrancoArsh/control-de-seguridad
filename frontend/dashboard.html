@@ -89,9 +89,13 @@
     rows.forEach(r => {
       const tr = document.createElement('tr');
       tr.className = r.authorized ? 'ok' : 'nok';
+
+      // crear enlace al perfil del usuario (user.html?id=...)
+      const profileUrl = `user.html?id=${encodeURIComponent(r.id || r.studentUid || '')}`;
+
       tr.innerHTML = `
         <td>${fmtTime(r.timestamp)}</td>
-        <td>${r.id || r.studentUid || ''}</td>
+        <td>${r.id || r.studentUid ? `<a href="${profileUrl}" target="_blank" rel="noopener noreferrer">${r.id || r.studentUid}</a>` : ''}</td>
         <td>${r.name || ''}</td>
         <td class="small-token">${hideToken(r.token)}</td>
         <td>${r.authorized ? '<span class="badge bg-success">Autorizado</span>' : '<span class="badge bg-danger">Rechazado</span>'}</td>
