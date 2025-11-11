@@ -11,6 +11,65 @@ import crypto from "crypto";
 
 dotenv.config();
 
+// Añade estas importaciones si no están
+import { Request, Response, NextFunction } from "express";
+
+// --- Middleware ADMIN_SECRET ---
+/**
+ * Requiere que el header `x-admin-secret` coincida con process.env.ADMIN_SECRET.
+ * Si ADMIN_SECRET no está definido, detenemos el servidor para evitar exposición.
+ */
+function ensureAdminSecretConfigured() {
+  if (!process.env.ADMIN_SECRET) {
+    console.error(
+      "\n[ERROR] ADMIN_SECRET no está configurado en las variables de entorno.\n" +
+      "Crea backend/.env con ADMIN_SECRET=tu_valor_secreto y reinicia el servidor.\n" +
+      "Ejemplo: ADMIN_SECRET=mi_secreto_super_seguro\n"
+    );
+    // Terminamos la ejecución para forzar que lo configures
+    process.exit(1);
+  }
+}
+
+function requireAdmin(req: Request, res: Response, next: NextFunction) {
+  // Si no existe ADMIN_SECRET abortamos (esto normalmente no ocurrirá porque forzamos en startup)
+  const secret = process.env.ADMIN_SECRET;
+  if (!secret) return res.status(500).json({ ok: false, error: "ADMIN_SECRET not configured on server" });
+
+  // Revisar header (aceptamos mayúsculas/minúsculas)
+  const header = (req.headers["x-admin-secret"] || req.headers["x-admin-token"] || "") as string;
+
+  if (String(header).trim() !== String(secret).trim()) {
+    return res.status(401).json({ ok: false, error: "unauthorized" });
+  }
+  return next();
+}
+
+// Llamar a esta función durante startup para verificar que ADMIN_SECRET existe
+ensureAdminSecretConfigured();
+
+
+async function ensureTokenForId(id: string) {
+  const tRef = db.ref(`accessTokens/${id}`);
+  const tSnap = await tRef.once("value");
+  if (tSnap.exists() && tSnap.val().token) {
+    return String(tSnap.val().token);
+  }
+  const newToken = crypto.randomBytes(12).toString("hex");
+  await tRef.set({ token: newToken, createdAt: Date.now() });
+  return newToken;
+}
+
+async function genQrDataUrl(id: string, token: string | null) {
+  if (!token) return null;
+  try {
+    return await QRCode.toDataURL(JSON.stringify({ id, token }), { margin:1, scale:8 });
+  } catch (e) {
+    console.warn("QR gen failed for", id, e);
+    return null;
+  }
+}
+
 // inicialización admin (mantén tu lógica actual)
 const SERVICE_ACCOUNT_PATH = process.env.GOOGLE_APPLICATION_CREDENTIALS || "./serviceAccountKey.json";
 const FIREBASE_DB_URL = process.env.FIREBASE_DATABASE_URL || "https://control-de-seguridad-b4fa7-default-rtdb.firebaseio.com/";
@@ -341,7 +400,7 @@ app.get("/users", async (req, res) => {
 
 
 // POST /users -> crear o actualizar usuario (upsert seguro)
-app.post("/users", async (req, res) => {
+app.post("/users", requireAdmin, async (req, res) => {
   try {
     let { id, name, role, token, regenerate } = req.body || {};
 
@@ -402,7 +461,7 @@ app.post("/users", async (req, res) => {
 
 // PUT /users/:id -> actualizar nombre/role y opcionalmente regenerar token
 // PUT /users/:id -> actualizar (merge) y opcionalmente regenerar token
-app.put("/users/:id", async (req, res) => {
+app.put("/users/:id", requireAdmin, async (req, res) => {
   try {
     const id = String(req.params.id || "").trim();
     if (!id) return res.status(400).json({ ok:false, error:"missing id" });
@@ -455,7 +514,7 @@ app.put("/users/:id", async (req, res) => {
 
 
 // DELETE /users/:id -> eliminar student y token (cuidado: irreversible)
-app.delete("/users/:id", async (req, res) => {
+app.delete("/users/:id", requireAdmin, async (req, res) => {
   try {
     const id = String(req.params.id || "").trim();
     if (!id) return res.status(400).json({ ok:false, error:"missing id" });
@@ -471,6 +530,283 @@ app.delete("/users/:id", async (req, res) => {
     return res.status(500).json({ ok:false, error:"server error" });
   }
 });
+
+// POST /guard/shift/start { guardId, createdByAdminId, notes? }
+app.post("/guard/shift/start", requireAdmin, async (req, res) => {
+  try {
+    const { guardId, createdByAdminId, notes } = req.body || {};
+    if (!guardId) return res.status(400).json({ ok:false, error:"guardId required" });
+
+    const shiftRef = db.ref("guardShifts").push();
+    const shiftId = shiftRef.key!;
+    const now = Date.now();
+    await shiftRef.set({
+      guardId,
+      startTimestamp: now,
+      createdByAdminId: createdByAdminId || null,
+      notes: notes || null
+    });
+    return res.json({ ok:true, shiftId, startTimestamp: now });
+  } catch (err) {
+    console.error("guard/shift/start", err);
+    return res.status(500).json({ ok:false, error:"server error" });
+  }
+});
+
+// POST /guard/shift/end { shiftId, guardId, notes? }
+app.post("/guard/shift/end", requireAdmin, async (req, res) => {
+  try {
+    const { shiftId, guardId, notes } = req.body || {};
+    if (!shiftId) return res.status(400).json({ ok:false, error:"shiftId required" });
+
+    const endTs = Date.now();
+    await db.ref(`guardShifts/${shiftId}`).update({
+      endTimestamp: endTs,
+      notes: notes || null
+    });
+    return res.json({ ok:true, shiftId, endTimestamp: endTs });
+  } catch (err) {
+    console.error("guard/shift/end", err);
+    return res.status(500).json({ ok:false, error:"server error" });
+  }
+});
+
+// POST /guard/authorize { guardId, studentId?, token?, sessionId?, note? }
+app.post("/guard/authorize", requireAdmin, async (req, res) => {
+  try {
+    const { guardId, studentId, token, sessionId = "default", note } = req.body || {};
+    if (!guardId) return res.status(400).json({ ok:false, error:"guardId required" });
+    if (!studentId && !token) return res.status(400).json({ ok:false, error:"studentId or token required" });
+
+    const now = Date.now();
+    // crear registro de autorización manual
+    const authRef = db.ref("guardAuthorizations").push();
+    const authId = authRef.key!;
+    await authRef.set({
+      guardId,
+      studentId: studentId || null,
+      token: token || null,
+      authorized: true,
+      reason: "manual_override",
+      note: note || null,
+      timestamp: now,
+      sessionId
+    });
+
+    // si tenemos studentId, registrar asistencia
+    if (studentId) {
+      await db.ref(`attendance/${sessionId}/${studentId}`).push({
+        type: "manual_entry_by_guard",
+        timestamp: now,
+        guardId,
+        authId
+      });
+    }
+
+    // registrar en accessHistory para tracking
+    await db.ref("accessHistory").push({
+      id: studentId || null,
+      token: token || null,
+      authorized: true,
+      reason: "manual_override",
+      timestamp: now,
+      guardOverrideId: authId
+    });
+
+    // opcional: enviar comando al totem/deviceCommands si quieres
+    // if student has deviceId, we can push deviceCommands...
+
+    return res.json({ ok:true, authId, timestamp: now });
+  } catch (err) {
+    console.error("guard/authorize", err);
+    return res.status(500).json({ ok:false, error:"server error" });
+  }
+});
+
+app.get("/guardShifts", async (req, res) => {
+  try {
+    const guardId = String(req.query.guardId || "").trim();
+    const snap = await db.ref("guardShifts").once("value");
+    const val = snap.val() || {};
+    const arr = Object.keys(val).map(k => ({ id: k, ...val[k] }));
+    const filtered = guardId ? arr.filter(s => s.guardId === guardId) : arr;
+    return res.json({ ok:true, count: filtered.length, data: filtered });
+  } catch (err) {
+    console.error("GET guardShifts", err);
+    return res.status(500).json({ ok:false, error:"server error" });
+  }
+});
+
+// guardAuthorizations list
+app.get("/guardAuthorizations", async (req, res) => {
+  try {
+    const guardId = String(req.query.guardId || "").trim();
+    const snap = await db.ref("guardAuthorizations").once("value");
+    const val = snap.val() || {};
+    const arr = Object.keys(val).map(k => ({ id: k, ...val[k] }));
+    const filtered = guardId ? arr.filter(a => a.guardId === guardId) : arr;
+    return res.json({ ok:true, count: filtered.length, data: filtered });
+  } catch (err) {
+    console.error("GET guardAuthorizations", err);
+    return res.status(500).json({ ok:false, error:"server error" });
+  }
+});
+
+// GET /teachers -> lista todos los docentes
+app.get("/teachers", requireAdmin, async (req, res) => {
+  try {
+    const snap = await db.ref("teachers").once("value");
+    const val = snap.val() || {};
+    const ids = Object.keys(val);
+    const out = await Promise.all(ids.map(async id => {
+      const token = await (async () => {
+        const tSnap = await db.ref(`accessTokens/${id}`).once("value");
+        return tSnap.exists() ? String(tSnap.val().token || null) : null;
+      })();
+      const qrDataUrl = token ? await genQrDataUrl(id, token) : null;
+      return { id, name: val[id].name || null, createdAt: val[id].createdAt || null, token, qrDataUrl };
+    }));
+    return res.json({ ok:true, count: out.length, data: out });
+  } catch (err) {
+    console.error("GET /teachers", err);
+    return res.status(500).json({ ok:false, error:"server error" });
+  }
+});
+
+// POST /teachers -> crear/upsert teacher { id?, name }
+app.post("/teachers", requireAdmin, async (req, res) => {
+  try {
+    let { id, name } = req.body || {};
+    if (!name || String(name).trim()==="") return res.status(400).json({ ok:false, error:"name required" });
+    name = String(name).trim();
+
+    if (!id || String(id).trim()==="") {
+      const now = Date.now();
+      const rand = crypto.randomBytes(3).toString('hex');
+      id = `teacher-${now.toString().slice(-6)}-${rand}`;
+    }
+    id = String(id);
+
+    await db.ref(`teachers/${id}`).update({ name, role:"docente", createdAt: Date.now() });
+
+    // ensure token exists and QR
+    const token = await ensureTokenForId(id);
+    const qrDataUrl = await genQrDataUrl(id, token);
+
+    return res.json({ ok:true, id, name, token, qrDataUrl });
+  } catch (err) {
+    console.error("POST /teachers", err);
+    return res.status(500).json({ ok:false, error:"server error" });
+  }
+});
+
+// PUT /teachers/:id -> actualizar nombre
+app.put("/teachers/:id", requireAdmin, async (req, res) => {
+  try {
+    const id = String(req.params.id || "");
+    const { name } = req.body || {};
+    if (!id) return res.status(400).json({ ok:false, error:"missing id" });
+    if (!name) return res.status(400).json({ ok:false, error:"name required" });
+    await db.ref(`teachers/${id}`).update({ name });
+    const tSnap = await db.ref(`accessTokens/${id}`).once("value");
+    const token = tSnap.exists() ? String(tSnap.val().token || null) : null;
+    const qrDataUrl = token ? await genQrDataUrl(id, token) : null;
+    return res.json({ ok:true, id, name, token, qrDataUrl });
+  } catch (err) {
+    console.error("PUT /teachers/:id", err);
+    return res.status(500).json({ ok:false, error:"server error" });
+  }
+});
+
+// DELETE /teachers/:id
+app.delete("/teachers/:id", requireAdmin, async (req, res) => {
+  try {
+    const id = String(req.params.id || "");
+    if (!id) return res.status(400).json({ ok:false, error:"missing id" });
+    await db.ref(`teachers/${id}`).remove();
+    // opcional: borrar token relacionado si quieres
+    await db.ref(`accessTokens/${id}`).remove();
+    return res.json({ ok:true, id, message:"deleted" });
+  } catch (err) {
+    console.error("DELETE /teachers/:id", err);
+    return res.status(500).json({ ok:false, error:"server error" });
+  }
+});
+
+/* ---------------- ADMINS ---------------- */
+// GET /admins
+app.get("/admins", requireAdmin, async (req, res) => {
+  try {
+    const snap = await db.ref("admins").once("value");
+    const val = snap.val() || {};
+    const ids = Object.keys(val);
+    const out = await Promise.all(ids.map(async id => {
+      const tSnap = await db.ref(`accessTokens/${id}`).once("value");
+      const token = tSnap.exists() ? String(tSnap.val().token || null) : null;
+      const qrDataUrl = token ? await genQrDataUrl(id, token) : null;
+      return { id, name: val[id].name || null, createdAt: val[id].createdAt || null, token, qrDataUrl };
+    }));
+    return res.json({ ok:true, count: out.length, data: out });
+  } catch (err) {
+    console.error("GET /admins", err);
+    return res.status(500).json({ ok:false, error:"server error" });
+  }
+});
+
+// POST /admins { id?, name }
+app.post("/admins", requireAdmin, async (req, res) => {
+  try {
+    let { id, name } = req.body || {};
+    if (!name || String(name).trim()==="") return res.status(400).json({ ok:false, error:"name required" });
+    name = String(name).trim();
+    if (!id || String(id).trim()==="") {
+      const now = Date.now();
+      const rand = crypto.randomBytes(3).toString('hex');
+      id = `admin-${now.toString().slice(-6)}-${rand}`;
+    }
+    id = String(id);
+    await db.ref(`admins/${id}`).update({ name, role:"admin", createdAt: Date.now() });
+    const token = await ensureTokenForId(id);
+    const qrDataUrl = await genQrDataUrl(id, token);
+    return res.json({ ok:true, id, name, token, qrDataUrl });
+  } catch (err) {
+    console.error("POST /admins", err);
+    return res.status(500).json({ ok:false, error:"server error" });
+  }
+});
+
+// PUT /admins/:id
+app.put("/admins/:id", requireAdmin, async (req, res) => {
+  try {
+    const id = String(req.params.id || "");
+    const { name } = req.body || {};
+    if (!id) return res.status(400).json({ ok:false, error:"missing id" });
+    if (!name) return res.status(400).json({ ok:false, error:"name required" });
+    await db.ref(`admins/${id}`).update({ name });
+    const tSnap = await db.ref(`accessTokens/${id}`).once("value");
+    const token = tSnap.exists() ? String(tSnap.val().token || null) : null;
+    const qrDataUrl = token ? await genQrDataUrl(id, token) : null;
+    return res.json({ ok:true, id, name, token, qrDataUrl });
+  } catch (err) {
+    console.error("PUT /admins/:id", err);
+    return res.status(500).json({ ok:false, error:"server error" });
+  }
+});
+
+// DELETE /admins/:id
+app.delete("/admins/:id", requireAdmin, async (req, res) => {
+  try {
+    const id = String(req.params.id || "");
+    if (!id) return res.status(400).json({ ok:false, error:"missing id" });
+    await db.ref(`admins/${id}`).remove();
+    await db.ref(`accessTokens/${id}`).remove();
+    return res.json({ ok:true, id, message:"deleted" });
+  } catch (err) {
+    console.error("DELETE /admins/:id", err);
+    return res.status(500).json({ ok:false, error:"server error" });
+  }
+});
+
 
 // --- Inicio del servidor ---
 const PORT = process.env.PORT || 3000;

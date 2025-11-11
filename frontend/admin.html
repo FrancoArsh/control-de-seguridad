@@ -12,6 +12,7 @@
     .qr-img { max-width:160px; border-radius:6px; background:#fff; padding:6px; }
     .muted { color:#9fb0c8; }
     .role-tabs .btn { min-width:90px; }
+    a { color: #9fd1ff; }
   </style>
 </head>
 <body>
@@ -41,12 +42,16 @@
         <div class="col-md-2">
           <button type="submit" class="btn btn-primary">Crear / Actualizar</button>
         </div>
-        <div class="col-md-2">
+        <div class="col-md-2 text-end">
           <button id="refreshBtn" type="button" class="btn btn-outline-light">Actualizar lista</button>
         </div>
       </form>
 
       <div id="createResult" class="mt-3"></div>
+      <div class="d-flex justify-content-end text-muted" style="font-size:0.9rem;">
+        Docentes: <span id="teacherCount" style="margin:0 8px;">0</span> |
+        Admins: <span id="adminCount" style="margin-left:8px;">0</span>
+      </div>
     </div>
 
     <div class="card p-3 mb-3">
@@ -77,307 +82,209 @@
               <th>ID</th><th>Nombre</th><th>Rol</th><th>Token</th><th>QR</th><th>Acciones</th>
             </tr>
           </thead>
-          <tbody id="usersBody"></tbody>
+          <tbody id="usersBody">
+            <tr><td colspan="6" class="muted">Cargando...</td></tr>
+          </tbody>
         </table>
       </div>
     </div>
   </div>
 
-<script>
-  const BACKEND_URL = "http://localhost:3000";
-  const usersBody = document.getElementById('usersBody');
+  <script>
+  /* ---------- CONFIG (cambia solo estas dos constantes según tu entorno) ---------- */
+  const BACKEND_URL = "http://localhost:3000";            // cambia si tu backend está en otro host
+  const ADMIN_SECRET = "mi_secreto_super_seguro";            // 
+  /* -------------------------------------------------------------------------------- */
+
+  // UI elements
   const createForm = document.getElementById('createForm');
-  const refreshBtn = document.getElementById('refreshBtn');
-  const createResult = document.getElementById('createResult');
+  const statusEl = document.getElementById('createResult') || document.createElement('div');
+  const usersBody = document.getElementById('usersBody');
   const filterRole = document.getElementById('filterRole');
+  const refreshBtn = document.getElementById('refreshBtn');
 
   let currentFilter = "";
 
-  async function fetchUsers(role = "") {
-    usersBody.innerHTML = '<tr><td colspan="6" class="muted">Cargando...</td></tr>';
+  // Helpers
+  function showMessage(text, level='info', timeout=3500) {
+    statusEl.innerHTML = `<div class="alert alert-${level} p-2">${text}</div>`;
+    setTimeout(()=> { if (statusEl.innerHTML.includes(text)) statusEl.innerHTML = ''; }, timeout);
+  }
+
+  function hideToken(t){ if(!t) return ''; return t.length>8? t.substring(0,4)+'…'+t.slice(-4):t; }
+
+  // fetch wrapper with admin-secret header
+  async function apiFetch(path, opts = {}) {
+    opts.headers = opts.headers || {};
+    opts.headers['x-admin-secret'] = ADMIN_SECRET;
+    opts.headers['Accept'] = 'application/json';
+    if (opts.body && typeof opts.body !== 'string') {
+      opts.body = JSON.stringify(opts.body);
+      opts.headers['Content-Type'] = 'application/json';
+    }
+    const res = await fetch(`${BACKEND_URL}${path}`, opts);
+    const j = await res.json().catch(()=>({ ok:false, error:'invalid json' }));
+    if (!res.ok && j && (j.error === 'unauthorized' || j.error === 'unauthenticated')) {
+      return { ok:false, error: 'unauthorized' };
+    }
+    return j;
+  }
+
+  // Create or update any role
+  async function createOrUpdateUser(id, name, role) {
+    if (!name) return { ok:false, error:'name required' };
+    return await apiFetch('/users', { method: 'POST', body: { id: id || undefined, name, role }});
+  }
+
+  // Fetch users (role optional)
+  async function fetchUsers(role="") {
     try {
-      const url = role ? `${BACKEND_URL}/users?role=${encodeURIComponent(role)}` : `${BACKEND_URL}/users`;
-      const res = await fetch(url);
-      const json = await res.json();
-      if (!json.ok) {
-        usersBody.innerHTML = `<tr><td colspan="6" class="muted">Error al cargar usuarios</td></tr>`;
-        return;
+      const qs = role ? `?role=${encodeURIComponent(role)}` : '';
+      const j = await apiFetch(`/users${qs}`, { method: 'GET' });
+      if (!j.ok) {
+        usersBody.innerHTML = `<tr><td colspan="6" class="muted">Error al cargar usuarios: ${j.error || 'server'}</td></tr>`;
+        return [];
       }
-      renderUsers(json.data || []);
+      return j.data || [];
     } catch (e) {
       usersBody.innerHTML = `<tr><td colspan="6" class="muted">Error de red</td></tr>`;
+      return [];
     }
   }
 
-  function hideToken(t) {
-    if (!t) return '';
-    return t.length > 8 ? t.substring(0,4) + '…' + t.substring(t.length-4) : t;
-  }
-
-// -----------------------
-  // reemplazo seguro de renderUsers
-  // -----------------------
-  function renderUsers(rows) {
-    usersBody.innerHTML = '';
-    if (!rows || !rows.length) {
+  // Render table
+  async function renderUsersTable(roleFilter="") {
+    usersBody.innerHTML = '<tr><td colspan="6" class="muted">Cargando...</td></tr>';
+    const rows = await fetchUsers(roleFilter);
+    if (!rows.length) {
       usersBody.innerHTML = `<tr><td colspan="6" class="muted">Sin usuarios</td></tr>`;
       return;
     }
-
+    usersBody.innerHTML = '';
     rows.forEach(r => {
       const tr = document.createElement('tr');
-
-      const tdId = document.createElement('td');
-      const link = document.createElement('a');
-      link.href = `user.html?id=${encodeURIComponent(r.id)}`;
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-      link.textContent = r.id || '';
-      tdId.appendChild(link);
-
-      const tdName = document.createElement('td');
-      tdName.textContent = r.name || '';
-
-      const tdRole = document.createElement('td');
-      tdRole.textContent = r.role || '';
-
-      const tdToken = document.createElement('td');
-      tdToken.className = 'small-token';
-      tdToken.textContent = hideToken(r.token);
-
-      const tdQr = document.createElement('td');
-      if (r.token) {
-        const img = document.createElement('img');
-        img.className = 'qr-img';
-        img.alt = `QR ${r.id}`;
-        img.dataset.id = r.id;
-        img.src = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs='; // placeholder
-        tdQr.appendChild(img);
-      }
-
-      const tdActions = document.createElement('td');
-
-      const btnEdit = document.createElement('button');
-      btnEdit.className = 'btn btn-sm btn-outline-light me-1';
-      btnEdit.textContent = 'Editar';
-      // pasar datos mediante dataset
-      btnEdit.dataset.id = r.id || '';
-      btnEdit.dataset.name = r.name || '';
-      btnEdit.dataset.role = r.role || '';
-
-      const btnReg = document.createElement('button');
-      btnReg.className = 'btn btn-sm btn-outline-light me-1';
-      btnReg.textContent = 'Regenerar';
-      btnReg.dataset.id = r.id || '';
-
-      const btnDel = document.createElement('button');
-      btnDel.className = 'btn btn-sm btn-danger';
-      btnDel.textContent = 'Eliminar';
-      btnDel.dataset.id = r.id || '';
-
-      tdActions.appendChild(btnEdit);
-      tdActions.appendChild(btnReg);
-      tdActions.appendChild(btnDel);
-
-      tr.appendChild(tdId);
-      tr.appendChild(tdName);
-      tr.appendChild(tdRole);
-      tr.appendChild(tdToken);
-      tr.appendChild(tdQr);
-      tr.appendChild(tdActions);
-
+      tr.innerHTML = `
+        <td><a href="user.html?id=${encodeURIComponent(r.id)}" target="_blank">${r.id}</a></td>
+        <td>${r.name || ''}</td>
+        <td>${r.role || ''}</td>
+        <td class="small-token">${hideToken(r.token)}</td>
+        <td>${r.qrDataUrl ? `<img src="${r.qrDataUrl}" style="max-width:120px;">` : ''}</td>
+        <td>
+          <button class="btn btn-sm btn-outline-light edit-btn" data-id="${r.id}" data-name="${r.name || ''}" data-role="${r.role || ''}">Editar</button>
+          <button class="btn btn-sm btn-outline-light regen-btn" data-id="${r.id}">Regenerar</button>
+          <button class="btn btn-sm btn-danger del-btn" data-id="${r.id}">Eliminar</button>
+        </td>
+      `;
       usersBody.appendChild(tr);
-
-      // Listener EDIT
-      btnEdit.addEventListener('click', () => {
-        document.getElementById('inputId').value = btnEdit.dataset.id || '';
-        document.getElementById('inputName').value = btnEdit.dataset.name || '';
-        document.getElementById('inputRole').value = btnEdit.dataset.role || 'estudiante';
-        window.scrollTo({ top:0, behavior:'smooth' });
-      });
-
-      // Listener REGENERATE
-      btnReg.addEventListener('click', async () => {
-        const id = btnReg.dataset.id;
-        if (!id) return;
-        if (!confirm(`Regenerar token para ${id}? Esto invalidará el anterior.`)) return;
-        btnReg.disabled = true;
-        try {
-          const resp = await fetch(`${BACKEND_URL}/users`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id, regenerate: true })
-          });
-          const js = await resp.json();
-          if (js.ok) {
-            await fetchUsers(currentFilter);
-            showMessage(`Token regenerado para ${id}`, 'success');
-          } else {
-            showMessage('Error regenerando token', 'danger');
-          }
-        } catch (err) {
-          showMessage('Error de red', 'danger');
-        } finally {
-          btnReg.disabled = false;
-        }
-      });
-
-      // Listener DELETE
-      btnDel.addEventListener('click', async () => {
-        const id = btnDel.dataset.id;
-        if (!id) return;
-        if (!confirm(`Eliminar usuario ${id} y su token? Esta acción es irreversible.`)) return;
-        btnDel.disabled = true;
-        try {
-          const resp = await fetch(`${BACKEND_URL}/users/${encodeURIComponent(id)}`, { method: 'DELETE' });
-          const js = await resp.json();
-          if (js.ok) {
-            await fetchUsers(currentFilter);
-            showMessage(`Usuario ${id} eliminado`, 'success');
-          } else {
-            showMessage('Error eliminando usuario', 'danger');
-          }
-        } catch (e) {
-          showMessage('Error de red', 'danger');
-        } finally {
-          btnDel.disabled = false;
-        }
-      });
     });
-
-    // Ahora rellenar QR imgs en 2º plano (las img que tienen dataset.id)
-    document.querySelectorAll('img.qr-img[data-id]').forEach(async (img) => {
-      const idVal = img.dataset.id;
-      if (!idVal) return;
-      try {
-        // POST /users {id} devuelve qrDataUrl (no regenera si ya existe token)
-        const resp = await fetch(`${BACKEND_URL}/users`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: idVal })
-        });
-        const js = await resp.json();
-        if (js.ok && js.qrDataUrl) img.src = js.qrDataUrl;
-      } catch (e) { /* leave placeholder */ }
-    });
-  }
 
     // listeners
-    document.querySelectorAll('.btn-regenerate').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const id = btn.getAttribute('data-id');
-        if (!confirm(`Regenerar token para ${id}? Esto invalidará el anterior.`)) return;
-        btn.disabled = true;
-        try {
-          const resp = await fetch(`${BACKEND_URL}/users`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id, regenerate: true })
-          });
-          const js = await resp.json();
-          if (js.ok) {
-            await fetchUsers(currentFilter);
-            showMessage(`Token regenerado para ${id}`, 'success');
-          } else {
-            showMessage('Error regenerando token', 'danger');
-          }
-        } catch (err) {
-          showMessage('Error de red', 'danger');
-        } finally {
-          btn.disabled = false;
+    document.querySelectorAll('.edit-btn').forEach(b => {
+      b.onclick = () => {
+        document.getElementById('inputId').value = b.dataset.id || '';
+        document.getElementById('inputName').value = b.dataset.name || '';
+        document.getElementById('inputRole').value = b.dataset.role || 'estudiante';
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      };
+    });
+
+    document.querySelectorAll('.regen-btn').forEach(b => {
+      b.onclick = async () => {
+        const id = b.dataset.id;
+        if (!confirm(`Regenerar token para ${id}?`)) return;
+        b.disabled = true;
+        const res = await apiFetch('/users', { method: 'POST', body: { id, regenerate: true }});
+        if (res.ok) {
+          showMessage(`Token regenerado para ${id}`, 'success');
+          await refreshAll();
+        } else {
+          showMessage(`Error: ${res.error || 'server'}`, 'danger');
         }
-      });
+        b.disabled = false;
+      };
     });
 
-    document.querySelectorAll('.btn-edit').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const id = btn.getAttribute('data-id');
-        const name = decodeURIComponent(btn.getAttribute('data-name') || '');
-        const role = btn.getAttribute('data-role') || 'estudiante';
-        document.getElementById('inputId').value = id;
-        document.getElementById('inputName').value = name;
-        document.getElementById('inputRole').value = role;
-        window.scrollTo({ top:0, behavior:'smooth' });
-      });
-    });
-
-    document.querySelectorAll('.btn-delete').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const id = btn.getAttribute('data-id');
-        if (!confirm(`Eliminar usuario ${id} y su token? Esta acción es irreversible.`)) return;
-        btn.disabled = true;
-        try {
-          const resp = await fetch(`${BACKEND_URL}/users/${encodeURIComponent(id)}`, { method: 'DELETE' });
-          const js = await resp.json();
-          if (js.ok) {
-            await fetchUsers(currentFilter);
-            showMessage(`Usuario ${id} eliminado`, 'success');
-          } else {
-            showMessage('Error eliminando usuario', 'danger');
-          }
-        } catch (e) {
-          showMessage('Error de red', 'danger');
-        } finally {
-          btn.disabled = false;
+    document.querySelectorAll('.del-btn').forEach(b => {
+      b.onclick = async () => {
+        const id = b.dataset.id;
+        if (!confirm(`Eliminar ${id}? Esto borrará student y token.`)) return;
+        b.disabled = true;
+        const res = await apiFetch(`/users/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        if (res.ok) {
+          showMessage(`Usuario ${id} eliminado`, 'success');
+          await refreshAll();
+        } else {
+          showMessage(`Error: ${res.error || 'server'}`, 'danger');
         }
-      });
+        b.disabled = false;
+      };
     });
-
-  function showMessage(text, level='info') {
-    createResult.innerHTML = `<div class="alert alert-${level} p-2">${text}</div>`;
-    setTimeout(()=> createResult.innerHTML = '', 3500);
   }
 
-  createForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
+  // Counts for docentes/admins
+  async function loadCounts() {
+    try {
+      const t = await apiFetch('/users?role=docente', { method: 'GET' });
+      const a = await apiFetch('/users?role=admin', { method: 'GET' });
+      document.getElementById('teacherCount').innerText = (t && t.count) ? t.count : 0;
+      document.getElementById('adminCount').innerText = (a && a.count) ? a.count : 0;
+    } catch (e) { /* ignore */ }
+  }
+
+  async function refreshAll() {
+    await renderUsersTable(currentFilter);
+    await loadCounts();
+  }
+
+  // form submit
+  createForm.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
     const id = document.getElementById('inputId').value.trim();
     const name = document.getElementById('inputName').value.trim();
-    const role = document.getElementById('inputRole').value;
-
-    if (!name) {
-      showMessage('Nombre requerido', 'warning');
-      return;
-    }
-    showMessage('Procesando...', 'info');
-    try {
-      const resp = await fetch(`${BACKEND_URL}/users`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: id || undefined, name, role })
-      });
-      const js = await resp.json();
-      if (js.ok) {
-        showMessage(`Usuario ${js.id} creado/actualizado.`, 'success');
-        document.getElementById('inputId').value = '';
-        document.getElementById('inputName').value = '';
-        await fetchUsers(currentFilter);
-      } else {
-        showMessage(`Error: ${js.error || 'server'}`, 'danger');
-      }
-    } catch (err) {
-      showMessage('Error de red', 'danger');
+    const role = document.getElementById('inputRole').value || 'estudiante';
+    if (!name) { showMessage('Nombre requerido', 'warning'); return; }
+    showMessage('Creando/Actualizando...', 'info', 2000);
+    const res = await createOrUpdateUser(id, name, role);
+    if (res.ok) {
+      showMessage(`Usuario ${res.id} creado/actualizado (${role})`, 'success');
+      document.getElementById('inputId').value = '';
+      document.getElementById('inputName').value = '';
+      await refreshAll();
+    } else {
+      if (res.error === 'unauthorized') showMessage('Error: unauthorized. Verifica ADMIN_SECRET', 'danger', 7000);
+      else showMessage(`Error: ${res.error || 'server'}`, 'danger', 5000);
     }
   });
 
-  refreshBtn.addEventListener('click', () => fetchUsers(currentFilter));
+  // filter role
+  filterRole?.addEventListener('change', async (e) => {
+    currentFilter = e.target.value || "";
+    await renderUsersTable(currentFilter);
+  });
 
-  // filtro
-  document.querySelectorAll('.role-tabs .btn').forEach(b => {
-    b.addEventListener('click', () => {
-      const r = b.getAttribute('data-role') || '';
+  // role tab buttons
+  document.querySelectorAll('.role-tabs button').forEach(btn=>{
+    btn.addEventListener('click', async (ev)=>{
+      const r = btn.dataset.role || '';
       filterRole.value = r;
       currentFilter = r;
-      fetchUsers(r);
+      await renderUsersTable(currentFilter);
     });
   });
 
-  filterRole.addEventListener('change', (e) => {
-    currentFilter = e.target.value || '';
-    fetchUsers(currentFilter);
+  // refresh button
+  refreshBtn?.addEventListener('click', () => refreshAll());
+
+  // initial load
+  window.addEventListener('load', async () => {
+    await refreshAll();
   });
 
-  // load
-  fetchUsers();
-</script>
+  // expose helper for form use
+  async function createOrUpdateUser(id, name, role) {
+    return await apiFetch('/users', { method: 'POST', body: { id: id || undefined, name, role }});
+  }
+  </script>
 </body>
 </html>
+
