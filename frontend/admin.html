@@ -11,6 +11,7 @@
     .small-token { font-family: monospace; }
     .qr-img { max-width:160px; border-radius:6px; background:#fff; padding:6px; }
     .muted { color:#9fb0c8; }
+    .role-tabs .btn { min-width:90px; }
   </style>
 </head>
 <body>
@@ -25,7 +26,7 @@
 
       <form id="createForm" class="row g-2">
         <div class="col-md-3">
-          <input id="inputId" class="form-control" placeholder="ID (opcional)" />
+          <input id="inputId" class="form-control" placeholder="ID (opcional para crear)" />
         </div>
         <div class="col-md-3">
           <input id="inputName" class="form-control" placeholder="Nombre" required />
@@ -48,8 +49,27 @@
       <div id="createResult" class="mt-3"></div>
     </div>
 
-    <div class="card p-3">
-      <h5>Usuarios registrados</h5>
+    <div class="card p-3 mb-3">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <h5>Usuarios registrados</h5>
+        <div class="role-tabs">
+          <button class="btn btn-sm btn-outline-light" data-role="">Todos</button>
+          <button class="btn btn-sm btn-outline-light" data-role="estudiante">Estudiantes</button>
+          <button class="btn btn-sm btn-outline-light" data-role="docente">Docentes</button>
+          <button class="btn btn-sm btn-outline-light" data-role="admin">Admins</button>
+        </div>
+      </div>
+
+      <div class="mb-2">
+        Filtrar por rol:
+        <select id="filterRole" class="form-select form-select-sm" style="width:180px; display:inline-block; margin-left:8px;">
+          <option value="">Todos</option>
+          <option value="estudiante">Estudiante</option>
+          <option value="docente">Docente</option>
+          <option value="admin">Admin</option>
+        </select>
+      </div>
+
       <div class="table-responsive">
         <table class="table table-sm table-borderless text-white">
           <thead class="muted">
@@ -69,11 +89,15 @@
   const createForm = document.getElementById('createForm');
   const refreshBtn = document.getElementById('refreshBtn');
   const createResult = document.getElementById('createResult');
+  const filterRole = document.getElementById('filterRole');
 
-  async function fetchUsers() {
+  let currentFilter = "";
+
+  async function fetchUsers(role = "") {
     usersBody.innerHTML = '<tr><td colspan="6" class="muted">Cargando...</td></tr>';
     try {
-      const res = await fetch(`${BACKEND_URL}/users`);
+      const url = role ? `${BACKEND_URL}/users?role=${encodeURIComponent(role)}` : `${BACKEND_URL}/users`;
+      const res = await fetch(url);
       const json = await res.json();
       if (!json.ok) {
         usersBody.innerHTML = `<tr><td colspan="6" class="muted">Error al cargar usuarios</td></tr>`;
@@ -90,53 +114,157 @@
     return t.length > 8 ? t.substring(0,4) + '…' + t.substring(t.length-4) : t;
   }
 
+// -----------------------
+  // reemplazo seguro de renderUsers
+  // -----------------------
   function renderUsers(rows) {
     usersBody.innerHTML = '';
-    if (!rows.length) {
+    if (!rows || !rows.length) {
       usersBody.innerHTML = `<tr><td colspan="6" class="muted">Sin usuarios</td></tr>`;
       return;
     }
+
     rows.forEach(r => {
       const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td><a href="user.html?id=${encodeURIComponent(r.id)}" target="_blank">${r.id}</a></td>
-        <td>${r.name || ''}</td>
-        <td>${r.role || ''}</td>
-        <td class="small-token">${hideToken(r.token)}</td>
-        <td>${r.token ? `<img class="qr-img" src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" data-token="${r.token}" alt="QR placeholder">` : ''}</td>
-        <td>
-          <button class="btn btn-sm btn-outline-light btn-regenerate" data-id="${r.id}">Regenerar</button>
-        </td>
-      `;
+
+      const tdId = document.createElement('td');
+      const link = document.createElement('a');
+      link.href = `user.html?id=${encodeURIComponent(r.id)}`;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = r.id || '';
+      tdId.appendChild(link);
+
+      const tdName = document.createElement('td');
+      tdName.textContent = r.name || '';
+
+      const tdRole = document.createElement('td');
+      tdRole.textContent = r.role || '';
+
+      const tdToken = document.createElement('td');
+      tdToken.className = 'small-token';
+      tdToken.textContent = hideToken(r.token);
+
+      const tdQr = document.createElement('td');
+      if (r.token) {
+        const img = document.createElement('img');
+        img.className = 'qr-img';
+        img.alt = `QR ${r.id}`;
+        img.dataset.id = r.id;
+        img.src = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs='; // placeholder
+        tdQr.appendChild(img);
+      }
+
+      const tdActions = document.createElement('td');
+
+      const btnEdit = document.createElement('button');
+      btnEdit.className = 'btn btn-sm btn-outline-light me-1';
+      btnEdit.textContent = 'Editar';
+      // pasar datos mediante dataset
+      btnEdit.dataset.id = r.id || '';
+      btnEdit.dataset.name = r.name || '';
+      btnEdit.dataset.role = r.role || '';
+
+      const btnReg = document.createElement('button');
+      btnReg.className = 'btn btn-sm btn-outline-light me-1';
+      btnReg.textContent = 'Regenerar';
+      btnReg.dataset.id = r.id || '';
+
+      const btnDel = document.createElement('button');
+      btnDel.className = 'btn btn-sm btn-danger';
+      btnDel.textContent = 'Eliminar';
+      btnDel.dataset.id = r.id || '';
+
+      tdActions.appendChild(btnEdit);
+      tdActions.appendChild(btnReg);
+      tdActions.appendChild(btnDel);
+
+      tr.appendChild(tdId);
+      tr.appendChild(tdName);
+      tr.appendChild(tdRole);
+      tr.appendChild(tdToken);
+      tr.appendChild(tdQr);
+      tr.appendChild(tdActions);
+
       usersBody.appendChild(tr);
+
+      // Listener EDIT
+      btnEdit.addEventListener('click', () => {
+        document.getElementById('inputId').value = btnEdit.dataset.id || '';
+        document.getElementById('inputName').value = btnEdit.dataset.name || '';
+        document.getElementById('inputRole').value = btnEdit.dataset.role || 'estudiante';
+        window.scrollTo({ top:0, behavior:'smooth' });
+      });
+
+      // Listener REGENERATE
+      btnReg.addEventListener('click', async () => {
+        const id = btnReg.dataset.id;
+        if (!id) return;
+        if (!confirm(`Regenerar token para ${id}? Esto invalidará el anterior.`)) return;
+        btnReg.disabled = true;
+        try {
+          const resp = await fetch(`${BACKEND_URL}/users`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, regenerate: true })
+          });
+          const js = await resp.json();
+          if (js.ok) {
+            await fetchUsers(currentFilter);
+            showMessage(`Token regenerado para ${id}`, 'success');
+          } else {
+            showMessage('Error regenerando token', 'danger');
+          }
+        } catch (err) {
+          showMessage('Error de red', 'danger');
+        } finally {
+          btnReg.disabled = false;
+        }
+      });
+
+      // Listener DELETE
+      btnDel.addEventListener('click', async () => {
+        const id = btnDel.dataset.id;
+        if (!id) return;
+        if (!confirm(`Eliminar usuario ${id} y su token? Esta acción es irreversible.`)) return;
+        btnDel.disabled = true;
+        try {
+          const resp = await fetch(`${BACKEND_URL}/users/${encodeURIComponent(id)}`, { method: 'DELETE' });
+          const js = await resp.json();
+          if (js.ok) {
+            await fetchUsers(currentFilter);
+            showMessage(`Usuario ${id} eliminado`, 'success');
+          } else {
+            showMessage('Error eliminando usuario', 'danger');
+          }
+        } catch (e) {
+          showMessage('Error de red', 'danger');
+        } finally {
+          btnDel.disabled = false;
+        }
+      });
     });
 
-    // actualizar imágenes QR en segundo plano (llamando POST /users para obtener qrDataUrl)
-    document.querySelectorAll('img.qr-img').forEach(async (img) => {
-      const id = img.getAttribute('data-token') ? null : null; // placeholder
-      // la estrategia: para mostrar QR real, llamaremos al endpoint POST /users con el id (regenerate: false) => devuelve qrDataUrl
-      const row = img.closest('tr');
-      const idCell = row.querySelector('td');
-      const idVal = idCell ? idCell.innerText.trim() : null;
+    // Ahora rellenar QR imgs en 2º plano (las img que tienen dataset.id)
+    document.querySelectorAll('img.qr-img[data-id]').forEach(async (img) => {
+      const idVal = img.dataset.id;
       if (!idVal) return;
       try {
+        // POST /users {id} devuelve qrDataUrl (no regenera si ya existe token)
         const resp = await fetch(`${BACKEND_URL}/users`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: idVal }) // esto devuelve qrDataUrl sin regenerar si ya existe token
+          body: JSON.stringify({ id: idVal })
         });
-        const json = await resp.json();
-        if (json.ok && json.qrDataUrl) {
-          img.src = json.qrDataUrl;
-        } else {
-          // dejar placeholder
-        }
+        const js = await resp.json();
+        if (js.ok && js.qrDataUrl) img.src = js.qrDataUrl;
       } catch (e) { /* leave placeholder */ }
     });
+  }
 
-    // listeners regenerate
+    // listeners
     document.querySelectorAll('.btn-regenerate').forEach(btn => {
-      btn.addEventListener('click', async (e) => {
+      btn.addEventListener('click', async () => {
         const id = btn.getAttribute('data-id');
         if (!confirm(`Regenerar token para ${id}? Esto invalidará el anterior.`)) return;
         btn.disabled = true;
@@ -148,19 +276,56 @@
           });
           const js = await resp.json();
           if (js.ok) {
-            await fetchUsers();
-            createResult.innerHTML = `<div class="alert alert-success p-2">Token regenerado para ${id}</div>`;
+            await fetchUsers(currentFilter);
+            showMessage(`Token regenerado para ${id}`, 'success');
           } else {
-            createResult.innerHTML = `<div class="alert alert-danger p-2">Error regenerando token</div>`;
+            showMessage('Error regenerando token', 'danger');
           }
         } catch (err) {
-          createResult.innerHTML = `<div class="alert alert-danger p-2">Error de red</div>`;
+          showMessage('Error de red', 'danger');
         } finally {
           btn.disabled = false;
-          setTimeout(()=> createResult.innerHTML = '', 3000);
         }
       });
     });
+
+    document.querySelectorAll('.btn-edit').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const id = btn.getAttribute('data-id');
+        const name = decodeURIComponent(btn.getAttribute('data-name') || '');
+        const role = btn.getAttribute('data-role') || 'estudiante';
+        document.getElementById('inputId').value = id;
+        document.getElementById('inputName').value = name;
+        document.getElementById('inputRole').value = role;
+        window.scrollTo({ top:0, behavior:'smooth' });
+      });
+    });
+
+    document.querySelectorAll('.btn-delete').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = btn.getAttribute('data-id');
+        if (!confirm(`Eliminar usuario ${id} y su token? Esta acción es irreversible.`)) return;
+        btn.disabled = true;
+        try {
+          const resp = await fetch(`${BACKEND_URL}/users/${encodeURIComponent(id)}`, { method: 'DELETE' });
+          const js = await resp.json();
+          if (js.ok) {
+            await fetchUsers(currentFilter);
+            showMessage(`Usuario ${id} eliminado`, 'success');
+          } else {
+            showMessage('Error eliminando usuario', 'danger');
+          }
+        } catch (e) {
+          showMessage('Error de red', 'danger');
+        } finally {
+          btn.disabled = false;
+        }
+      });
+    });
+
+  function showMessage(text, level='info') {
+    createResult.innerHTML = `<div class="alert alert-${level} p-2">${text}</div>`;
+    setTimeout(()=> createResult.innerHTML = '', 3500);
   }
 
   createForm.addEventListener('submit', async (e) => {
@@ -170,10 +335,10 @@
     const role = document.getElementById('inputRole').value;
 
     if (!name) {
-      createResult.innerHTML = `<div class="alert alert-warning p-2">Nombre requerido</div>`;
+      showMessage('Nombre requerido', 'warning');
       return;
     }
-    createResult.innerHTML = `<div class="muted">Procesando...</div>`;
+    showMessage('Procesando...', 'info');
     try {
       const resp = await fetch(`${BACKEND_URL}/users`, {
         method: 'POST',
@@ -182,22 +347,34 @@
       });
       const js = await resp.json();
       if (js.ok) {
-        createResult.innerHTML = `<div class="alert alert-success p-2">Usuario ${js.id} creado/actualizado.</div>
-          ${ js.qrDataUrl ? `<div class="mt-2"><img src="${js.qrDataUrl}" class="qr-img" /></div>` : '' }`;
+        showMessage(`Usuario ${js.id} creado/actualizado.`, 'success');
         document.getElementById('inputId').value = '';
         document.getElementById('inputName').value = '';
-        await fetchUsers();
+        await fetchUsers(currentFilter);
       } else {
-        createResult.innerHTML = `<div class="alert alert-danger p-2">Error: ${js.error || 'server'}</div>`;
+        showMessage(`Error: ${js.error || 'server'}`, 'danger');
       }
     } catch (err) {
-      createResult.innerHTML = `<div class="alert alert-danger p-2">Error de red</div>`;
-    } finally {
-      setTimeout(()=> createResult.innerHTML = '', 5000);
+      showMessage('Error de red', 'danger');
     }
   });
 
-  refreshBtn.addEventListener('click', fetchUsers);
+  refreshBtn.addEventListener('click', () => fetchUsers(currentFilter));
+
+  // filtro
+  document.querySelectorAll('.role-tabs .btn').forEach(b => {
+    b.addEventListener('click', () => {
+      const r = b.getAttribute('data-role') || '';
+      filterRole.value = r;
+      currentFilter = r;
+      fetchUsers(r);
+    });
+  });
+
+  filterRole.addEventListener('change', (e) => {
+    currentFilter = e.target.value || '';
+    fetchUsers(currentFilter);
+  });
 
   // load
   fetchUsers();

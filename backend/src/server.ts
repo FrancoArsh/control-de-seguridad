@@ -307,14 +307,17 @@ app.get("/user/:id", async (req, res) => {
 //    returns object with qrDataUrl
 // ---------------------------
 
+// Modificar GET /users para aceptar ?role=estudiante|docente|admin (si no, devuelve todos)
+// GET /users?role=...
 app.get("/users", async (req, res) => {
   try {
+    const qRole = String(req.query.role || "").trim().toLowerCase();
     const studentsSnap = await db.ref("students").once("value");
     const studentsVal = studentsSnap.val() || {};
-
-    // Convertir a array y leer tokens en paralelo
     const ids = Object.keys(studentsVal);
+
     const users = await Promise.all(ids.map(async (id) => {
+      const s = studentsVal[id] || {};
       let token = null;
       try {
         const tSnap = await db.ref(`accessTokens/${id}`).once("value");
@@ -322,77 +325,152 @@ app.get("/users", async (req, res) => {
       } catch (e) { /* ignore */ }
       return {
         id,
-        name: studentsVal[id].name || null,
-        role: studentsVal[id].role || null,
+        name: s.name || null,
+        role: s.role || null,
         token
       };
     }));
 
-    return res.json({ ok: true, count: users.length, data: users });
+    const filtered = qRole ? users.filter(u => (u.role || "").toLowerCase() === qRole) : users;
+    return res.json({ ok:true, count: filtered.length, data: filtered });
   } catch (err) {
     console.error("GET /users error:", err);
-    return res.status(500).json({ ok: false, error: "server error" });
+    return res.status(500).json({ ok:false, error:"server error" });
   }
 });
 
+
+// POST /users -> crear o actualizar usuario (upsert seguro)
 app.post("/users", async (req, res) => {
   try {
     let { id, name, role, token, regenerate } = req.body || {};
 
+    // Normalizar y validar
+    name = typeof name === "string" ? name.trim() : "";
+    role = typeof role === "string" ? role.trim().toLowerCase() : "";
+
+    // Validar role aceptado; si viene vacío, obligamos a 'estudiante'
+    const allowedRoles = ["estudiante", "docente", "admin"];
+    if (!role || !allowedRoles.includes(role)) role = "estudiante";
+
+    // Si no hay name, no permitimos crear un usuario vacío
+    if (!name) {
+      return res.status(400).json({ ok: false, error: "name required" });
+    }
+
     // Generar id si no viene
     if (!id || String(id).trim() === "") {
-      // id formato est-XXX
-      id = `est-${Math.floor(Math.random() * 900 + 100)}`;
+      const now = new Date();
+      const y = now.getFullYear();
+      const m = String(now.getMonth()+1).padStart(2,'0');
+      const d = String(now.getDate()).padStart(2,'0');
+      const rand = crypto.randomBytes(4).toString('hex').slice(0,6);
+      id = `est-${y}${m}${d}-${rand}`;
     }
     id = String(id);
 
-    // Guardar/actualizar datos del estudiante
+    // Upsert: usar update() para mezclar (no borrar otros campos accidentales)
     await db.ref(`students/${id}`).update({
-      name: name || null,
-      role: role || null
+      name,
+      role
     });
 
-    // Leer token existente si no se pasó token
-    if (!token) {
-      const existingSnap = await db.ref(`accessTokens/${id}`).once("value");
-      if (existingSnap.exists()) token = String(existingSnap.val().token || null);
-    }
-
-    // Regenerar token si piden o si no hay token
-    if (regenerate === true || !token) {
+    // Token: si piden regenerar o no existe, generarlo
+    const tokenSnap = await db.ref(`accessTokens/${id}`).once("value");
+    if (regenerate === true || !tokenSnap.exists()) {
       token = crypto.randomBytes(12).toString("hex");
+      await db.ref(`accessTokens/${id}`).set({ token, createdAt: Date.now() });
+    } else {
+      token = String(tokenSnap.val().token || "");
     }
 
-    // Escribir token en accessTokens/{id}
-    await db.ref(`accessTokens/${id}`).set({
-      token,
-      createdAt: Date.now()
-    });
-
-    // Generar QR data URL con payload {id, token}
+    // Generar QR data URL
     let qrDataUrl: string | null = null;
     try {
-      const payload = JSON.stringify({ id, token });
-      qrDataUrl = await QRCode.toDataURL(payload, { margin: 1, scale: 8 });
+      qrDataUrl = await QRCode.toDataURL(JSON.stringify({ id, token }), { margin:1, scale:8 });
     } catch (e) {
-      console.warn("POST /users -> QR generation failed:", e);
+      console.warn("QR gen failed:", e);
     }
 
-    return res.json({
-      ok: true,
-      id,
-      name: name || null,
-      role: role || null,
-      token,
-      qrDataUrl
-    });
-
+    return res.json({ ok: true, id, name, role, token, qrDataUrl });
   } catch (err) {
     console.error("POST /users error:", err);
-    return res.status(500).json({ ok: false, error: "server error" });
+    return res.status(500).json({ ok:false, error:"server error" });
   }
 });
 
+
+// PUT /users/:id -> actualizar nombre/role y opcionalmente regenerar token
+// PUT /users/:id -> actualizar (merge) y opcionalmente regenerar token
+app.put("/users/:id", async (req, res) => {
+  try {
+    const id = String(req.params.id || "").trim();
+    if (!id) return res.status(400).json({ ok:false, error:"missing id" });
+
+    const { name, role, regenerate } = req.body || {};
+
+    // Validar role (si viene)
+    const allowedRoles = ["estudiante", "docente", "admin"];
+    const updates: any = {};
+    if (typeof name === "string" && name.trim() !== "") updates.name = name.trim();
+    if (typeof role === "string" && allowedRoles.includes(role.trim().toLowerCase())) updates.role = role.trim().toLowerCase();
+
+    // Si no hay campos válidos y no pide regenerar token, no hacer nada
+    if (Object.keys(updates).length === 0 && !regenerate) {
+      return res.status(400).json({ ok:false, error:"nothing to update" });
+    }
+
+    // Aplicar cambios (merge)
+    if (Object.keys(updates).length) {
+      await db.ref(`students/${id}`).update(updates);
+    }
+
+    // Regenerar token si solicitó
+    let token = null;
+    if (regenerate === true) {
+      token = crypto.randomBytes(12).toString("hex");
+      await db.ref(`accessTokens/${id}`).set({ token, createdAt: Date.now() });
+    } else {
+      const tSnap = await db.ref(`accessTokens/${id}`).once("value");
+      if (tSnap.exists()) token = String(tSnap.val().token || null);
+    }
+
+    // Obtener datos actuales para respuesta
+    const sSnap = await db.ref(`students/${id}`).once("value");
+    const student = sSnap.exists() ? sSnap.val() : {};
+
+    let qrDataUrl: string | null = null;
+    if (token) {
+      try {
+        qrDataUrl = await QRCode.toDataURL(JSON.stringify({ id, token }), { margin:1, scale:8 });
+      } catch (e) { /* ignore */ }
+    }
+
+    return res.json({ ok:true, id, name: student.name || null, role: student.role || null, token, qrDataUrl });
+  } catch (err) {
+    console.error("PUT /users/:id error:", err);
+    return res.status(500).json({ ok:false, error:"server error" });
+  }
+});
+
+
+// DELETE /users/:id -> eliminar student y token (cuidado: irreversible)
+app.delete("/users/:id", async (req, res) => {
+  try {
+    const id = String(req.params.id || "").trim();
+    if (!id) return res.status(400).json({ ok:false, error:"missing id" });
+
+    // Opcional: respaldar antes de borrar (puedes implementarlo si quieres)
+    // Eliminamos student y token, NOTA: también podrías querer borrar attendance o accessHistory relacionadas
+    await db.ref(`students/${id}`).remove();
+    await db.ref(`accessTokens/${id}`).remove();
+
+    return res.json({ ok: true, id, message: "deleted" });
+  } catch (err) {
+    console.error("DELETE /users/:id error:", err);
+    return res.status(500).json({ ok:false, error:"server error" });
+  }
+});
 
 // --- Inicio del servidor ---
 const PORT = process.env.PORT || 3000;
