@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Guard - Control de Seguridad</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style> body{background:#0f1724;color:#e6eef8;padding:1rem} .card{border-radius:10px} .muted{color:#9fb0c8} </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card p-3 mb-3">
+      <h4>Guard Login</h4>
+      <div id="loginResult"></div>
+      <div class="row g-2">
+        <div class="col-md-3"><input id="guardId" class="form-control" placeholder="ID guardia (ej: guard-03)"></div>
+        <div class="col-md-3"><input id="guardPin" class="form-control" placeholder="PIN"></div>
+        <div class="col-md-3"><button id="btnLogin" class="btn btn-primary">Login</button></div>
+      </div>
+    </div>
+
+    <div class="card p-3 mb-3">
+      <h5>Shift control</h5>
+      <div id="shiftResult" class="mb-2"></div>
+      <div id="shiftPanel" style="display:none;">
+        <div>Guard: <b id="guardName"></b> (<span id="guardIdShow"></span>)</div>
+        <div class="mt-2">
+          <button id="btnStartShift" class="btn btn-success">Iniciar turno</button>
+          <button id="btnEndShift" class="btn btn-danger">Finalizar turno</button>
+          <span class="muted ms-3">Shift actual: <span id="currentShift">-</span></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card p-3 mb-3">
+      <h5>Acciones rápidas</h5>
+      <div class="muted">Puedes iniciar turno y luego usar el Totem para autorizar manualmente (o usar este panel para pruebas).</div>
+      <div class="mt-2">
+        <input id="manualStudentId" class="form-control d-inline-block" style="width:250px" placeholder="studentId (opcional)">
+        <input id="manualToken" class="form-control d-inline-block ms-2" style="width:250px" placeholder="token (opcional)">
+        <button id="btnManualAuthorize" class="btn btn-primary ms-2">Autorizar manual</button>
+      </div>
+      <div id="manualRes" class="mt-2"></div>
+    </div>
+
+  </div>
+
+<script>
+const BACKEND_URL = "http://localhost:3000";
+
+function show(el, msg, cls='info') { el.innerHTML = `<div class="alert alert-${cls} p-2">${msg}</div>`; setTimeout(()=>el.innerHTML='',5000); }
+
+async function guardLogin(id,pin) {
+  const r = await fetch(BACKEND_URL + '/guard/login', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id,pin})});
+  return await r.json();
+}
+
+document.getElementById('btnLogin').onclick = async () => {
+  const id = document.getElementById('guardId').value.trim();
+  const pin = document.getElementById('guardPin').value.trim();
+  if (!id || !pin) return show(document.getElementById('loginResult'), 'ID y PIN requeridos','warning');
+  const res = await guardLogin(id,pin);
+  if (!res.ok) return show(document.getElementById('loginResult'), 'Login falló: ' + (res.error||'error'),'danger');
+  localStorage.guardToken = res.token;
+  localStorage.guardId = res.guardId;
+  document.getElementById('guardName').innerText = res.name;
+  document.getElementById('guardIdShow').innerText = res.guardId;
+  document.getElementById('shiftPanel').style.display = 'block';
+  show(document.getElementById('loginResult'), 'Login ok','success');
+  // restore current shift if any
+  if (localStorage.currentShift) document.getElementById('currentShift').innerText = localStorage.currentShift;
+};
+
+document.getElementById('btnStartShift').onclick = async () => {
+  const token = localStorage.guardToken;
+  if (!token) return show(document.getElementById('shiftResult'), 'Debes logearte primero','warning');
+  const r = await fetch(BACKEND_URL + '/guard/shift/start', { method:'POST', headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer '+token }, body: JSON.stringify({ notes: 'start via GUI' })});
+  const j = await r.json();
+  if (!j.ok) return show(document.getElementById('shiftResult'), 'Error: '+(j.error||'server'),'danger');
+  localStorage.currentShift = j.shiftId;
+  document.getElementById('currentShift').innerText = j.shiftId;
+  show(document.getElementById('shiftResult'), 'Turno iniciado','success');
+};
+
+document.getElementById('btnEndShift').onclick = async () => {
+  const token = localStorage.guardToken;
+  const shiftId = localStorage.currentShift;
+  if (!token || !shiftId) return show(document.getElementById('shiftResult'), 'No hay turno activo','warning');
+  const r = await fetch(BACKEND_URL + '/guard/shift/end', { method:'POST', headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer '+token }, body: JSON.stringify({ shiftId })});
+  const j = await r.json();
+  if (!j.ok) return show(document.getElementById('shiftResult'), 'Error: '+(j.error||'server'),'danger');
+  show(document.getElementById('shiftResult'), 'Turno finalizado','success');
+  localStorage.removeItem('currentShift');
+  document.getElementById('currentShift').innerText = '-';
+};
+
+// manual authorize (for quick test)
+document.getElementById('btnManualAuthorize').onclick = async () => {
+  const token = localStorage.guardToken;
+  const shiftId = localStorage.currentShift || null;
+  if (!token) return show(document.getElementById('manualRes'), 'Debes logearte primero','warning');
+  const studentId = document.getElementById('manualStudentId').value.trim() || null;
+  const tokenVal = document.getElementById('manualToken').value.trim() || null;
+  if (!studentId && !tokenVal) return show(document.getElementById('manualRes'), 'Id o token requerido','warning');
+  const r = await fetch(BACKEND_URL + '/guard/authorize', { method:'POST', headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer '+token }, body: JSON.stringify({ studentId, token: tokenVal, shiftId, note: 'manual via GUI' })});
+  const j = await r.json();
+  if (!j.ok) return show(document.getElementById('manualRes'), 'Error: '+(j.error||'server'),'danger');
+  show(document.getElementById('manualRes'), 'Autorización registrada','success');
+};
+</script>
+</body>
+</html>

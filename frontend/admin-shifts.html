@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Admin - Shifts</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<style> body{background:#0f1724;color:#e6eef8;padding:1rem} .card{border-radius:10px} .muted{color:#9fb0c8} </style>
+</head>
+<body>
+<div class="container">
+  <div class="card p-3 mb-3">
+    <h4>Dashboard Guardias & Turnos</h4>
+    <div class="row g-2">
+      <div class="col-md-4"><input id="filterGuardId" class="form-control" placeholder="Buscar guard id (ej: guard-03)"></div>
+      <div class="col-md-2"><button id="btnLoadShifts" class="btn btn-primary">Cargar Turnos</button></div>
+    </div>
+  </div>
+
+  <div class="card p-3 mb-3">
+    <h5>Turnos</h5>
+    <div id="shiftsList" class="mb-3">—</div>
+  </div>
+
+  <div class="card p-3 mb-3">
+    <h5>Detalle turno</h5>
+    <div id="shiftDetail">Seleccione un turno para ver historial.</div>
+  </div>
+</div>
+
+<script>
+const BACKEND_URL = "http://localhost:3000";
+const ADMIN_SECRET = "MI_ADMIN_SECRET_AQUI"; // reemplaza con tu secreto (solo pruebas locales)
+
+async function apiFetch(path, opts={}) {
+  opts.headers = opts.headers || {};
+  opts.headers['x-admin-secret'] = ADMIN_SECRET;
+  opts.headers['Accept'] = 'application/json';
+  if (opts.body && typeof opts.body !== 'string') {
+    opts.body = JSON.stringify(opts.body);
+    opts.headers['Content-Type'] = 'application/json';
+  }
+  const r = await fetch(BACKEND_URL + path, opts);
+  return await r.json();
+}
+
+document.getElementById('btnLoadShifts').onclick = async () => {
+  const guardId = document.getElementById('filterGuardId').value.trim();
+  const qs = guardId ? `?guardId=${encodeURIComponent(guardId)}` : '';
+  const j = await apiFetch(`/guardShifts${qs}`, { method:'GET' });
+  if (!j.ok) return document.getElementById('shiftsList').innerText = 'Error: '+(j.error||'server');
+  const html = j.data.map(s => {
+    const start = new Date(s.startTimestamp).toLocaleString();
+    const end = s.endTimestamp ? new Date(s.endTimestamp).toLocaleString() : 'activo';
+    return `<div style="padding:8px;border-bottom:1px solid #223"><b>Shift ${s.id}</b> — Guard: ${s.guardId} — ${start} → ${end}
+            <button data-id="${s.id}" class="btn btn-sm btn-outline-light ms-2 viewShift">Ver historial</button></div>`;
+  }).join('');
+  document.getElementById('shiftsList').innerHTML = html || 'Sin turnos';
+  document.querySelectorAll('.viewShift').forEach(b=>b.onclick = ()=> loadShiftDetail(b.dataset.id));
+};
+
+async function loadShiftDetail(shiftId) {
+  const j = await apiFetch(`/shift/${encodeURIComponent(shiftId)}/history`, { method:'GET' });
+  if (!j.ok) return document.getElementById('shiftDetail').innerText = 'Error: ' + (j.error||'server');
+  const rows = j.data.map(r => {
+    const time = new Date(r.timestamp).toLocaleString();
+    const name = r.studentName || (r.id || '-');
+    const token = r.token ? r.token.slice(0,6)+'…'+r.token.slice(-4) : '-';
+    const res = r.authorized ? '<span class="badge bg-success">Autorizado</span>' : '<span class="badge bg-danger">Rechazado</span>';
+    return `<tr><td>${time}</td><td>${r.id || '-'}</td><td>${name}</td><td>${token}</td><td>${res}</td><td>${r.reason||'-'}</td></tr>`;
+  }).join('');
+  document.getElementById('shiftDetail').innerHTML = `
+    <div><b>Shift:</b> ${j.shift ? j.shift.guardId + ' / ' + j.shift.startTimestamp : shiftId}</div>
+    <table class="table table-sm text-white"><thead><tr><th>Hora</th><th>ID</th><th>Nombre</th><th>Token</th><th>Resultado</th><th>Motivo</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+</script>
+</body>
+</html>
