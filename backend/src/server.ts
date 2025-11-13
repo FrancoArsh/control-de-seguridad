@@ -289,19 +289,86 @@ app.post("/verify", async (req, res) => {
 });
 
 // GET /history
-app.get("/history", async (req, res) => {
+// GET /history (mejorado) -> soporta ?limit=50 & ?guardId=... & ?shiftId=...
+app.get("/history", async (req: Request, res: Response) => {
   try {
-    const limit = Math.min(Number(req.query.limit) || 50, 500);
-    const snap = await db.ref('accessHistory').orderByChild('timestamp').limitToLast(limit).once('value');
-    const val = snap.val() || {};
-    const arr = Object.keys(val).map(k => ({ key: k, ...val[k] }))
-                   .sort((a,b) => b.timestamp - a.timestamp);
-    return res.json({ ok: true, count: arr.length, data: arr });
+    const limit = Math.min(Number(req.query.limit) || 200, 1000);
+    const guardIdQ = String(req.query.guardId || "").trim();
+    const shiftIdQ = String(req.query.shiftId || "").trim();
+    // Cargamos accessHistory (limitar lectura es posible si la DB crece)
+    const ahSnap = await db.ref("accessHistory").orderByChild("timestamp").limitToLast(10000).once("value");
+    const ahVal = ahSnap.val() || {};
+    let rows = Object.keys(ahVal).map(k => ({ key: k, ...ahVal[k] as any }));
+
+    // Si piden guardId -> buscar guardAuthorizations del guard y guardShifts para hacer match
+    let gaIds: string[] = [];
+    let guardShiftIds: string[] = [];
+    if (guardIdQ) {
+      const gaSnap = await db.ref("guardAuthorizations").orderByChild("guardId").equalTo(guardIdQ).once("value");
+      const gaVal = gaSnap.val() || {};
+      gaIds = Object.keys(gaVal);
+
+      const gsSnap = await db.ref("guardShifts").orderByChild("guardId").equalTo(guardIdQ).once("value");
+      const gsVal = gsSnap.val() || {};
+      guardShiftIds = Object.keys(gsVal);
+
+      rows = rows.filter((r: any) => {
+        // si el registro contiene guardId directo
+        if (String(r.guardId || "") === guardIdQ) return true;
+        // si tiene guardOverrideId y ese id pertenece a guardAuthorizations
+        if (r.guardOverrideId && gaIds.includes(r.guardOverrideId)) return true;
+        // si tiene shiftId y ese shift pertenece al guard
+        if (r.shiftId && guardShiftIds.includes(r.shiftId)) return true;
+        return false;
+      });
+    }
+
+    // Si piden shiftId -> filtrar por shiftId exacto (también funciona solo con shiftId)
+    if (shiftIdQ) {
+      rows = rows.filter((r: any) => String(r.shiftId || "") === shiftIdQ);
+    }
+
+    // Ordenar desc por timestamp y limitar
+    rows = rows.sort((a: any, b: any) => (b.timestamp || 0) - (a.timestamp || 0)).slice(0, limit);
+
+    // Enriquecer registros (studentName, guard info, shift info) — opcional pero útil
+    const enriched = await Promise.all(rows.map(async (r: any) => {
+      // studentName
+      if (r.id) {
+        try {
+          const s = await db.ref(`students/${r.id}`).once("value");
+          if (s.exists()) r.studentName = s.val().name || null;
+        } catch (_) { /* ignore */ }
+      }
+      // guardOverrideId -> agregar guardId/guardName
+      if (r.guardOverrideId) {
+        try {
+          const ga = await db.ref(`guardAuthorizations/${r.guardOverrideId}`).once("value");
+          if (ga.exists()) {
+            const gav = ga.val();
+            r.guardId = gav.guardId || r.guardId || null;
+            const gSnap = await db.ref(`guards/${gav.guardId}`).once("value");
+            if (gSnap.exists()) r.guardName = gSnap.val().name || null;
+          }
+        } catch (_) { /* ignore */ }
+      }
+      // shift info si existe shiftId
+      if (r.shiftId) {
+        try {
+          const sSnap = await db.ref(`guardShifts/${r.shiftId}`).once("value");
+          if (sSnap.exists()) r.shift = sSnap.val();
+        } catch (_) { /* ignore */ }
+      }
+      return r;
+    }));
+
+    return res.json({ ok: true, count: enriched.length, data: enriched });
   } catch (err) {
-    console.error("GET /history error:", err);
+    console.error("GET /history (improved) error:", err);
     return res.status(500).json({ ok: false, error: "server error" });
   }
 });
+
 
 // GET /user/:id
 app.get("/user/:id", async (req, res) => {

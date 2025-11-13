@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Admin — Control de Seguridad (Usuarios & Shifts)</title>
+  <title>Admin — Control de Seguridad (Usuarios & Shifts & Historial)</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
     body { background:#0f1724; color:#e6eef8; padding:1rem; }
@@ -13,6 +13,7 @@
     .nav-btn { min-width:120px; }
     .mono { font-family: monospace; }
     .small-muted { color:#9fb0c8; font-size:.9rem; }
+    .list-group-item { background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.03); }
   </style>
 </head>
 <body>
@@ -24,6 +25,7 @@
       <div>
         <button id="btnNavUsers" class="btn btn-sm btn-outline-light nav-btn">Usuarios</button>
         <button id="btnNavShifts" class="btn btn-sm btn-outline-light nav-btn">Turnos</button>
+        <button id="btnNavHistory" class="btn btn-sm btn-outline-light nav-btn">Historial</button>
         <a href="index.html" class="btn btn-sm btn-outline-light">Ir al Totem</a>
       </div>
     </div>
@@ -93,7 +95,16 @@
         </div>
       </div>
 
-      <div class="row">
+      <div class="d-flex gap-2 mb-2 align-items-center">
+        <button id="btnShowActive" class="btn btn-sm btn-primary">Mostrar En turno</button>
+        <button id="btnShowAll" class="btn btn-sm btn-outline-light">Mostrar Todos</button>
+        <!-- NUEVO: Filtros de fecha -->
+        <input type="date" id="filterStartDate" class="form-control form-control-sm w-auto" />
+        <input type="date" id="filterEndDate" class="form-control form-control-sm w-auto" />
+        <button id="btnFilterDate" class="btn btn-sm btn-success">Filtrar</button>
+      </div>
+
+      <div class="row mt-2">
         <div class="col-md-6">
           <h6>En turno</h6>
           <div id="activeList" class="list-group mb-3"></div>
@@ -104,6 +115,45 @@
         </div>
       </div>
     </section>
+
+    <!-- SECTION: HISTORY (Admin - Access Logs) -->
+    <section id="sectionHistory" class="card p-3 mb-3 hidden">
+  <div class="d-flex justify-content-between align-items-center mb-2">
+    <h5 class="m-0">Historial de accesos</h5>
+    <div class="small-muted">Registros de estudiantes y guardias</div>
+  </div>
+
+  <div class="row g-2 mb-2 align-items-end">
+    <div class="col-md-3">
+      <input id="filterGuardHistory" class="form-control" placeholder="Filtrar por guard ID (ej: guard-01)">
+    </div>
+    <div class="col-md-3">
+      <input id="filterStartHistory" type="date" class="form-control">
+    </div>
+    <div class="col-md-3">
+      <input id="filterEndHistory" type="date" class="form-control">
+    </div>
+    <div class="col-md-3">
+      <button id="btnFilterHistory" class="btn btn-primary w-100">Aplicar filtros</button>
+    </div>
+  </div>
+
+  <div class="table-responsive">
+    <table class="table table-sm table-borderless text-white align-middle">
+      <thead class="muted">
+        <tr>
+          <th>Fecha/Hora</th>
+          <th>Estudiante</th>
+          <th>Guardia</th>
+          <th>Shift ID</th>
+          <th>Resultado</th>
+          <th>Motivo</th>
+        </tr>
+      </thead>
+      <tbody id="historyBody"><tr><td colspan="6" class="muted">Cargando...</td></tr></tbody>
+    </table>
+  </div>
+</section>
 
   </div>
 
@@ -118,7 +168,7 @@ function toast(msg, level='info', timeout=3500) {
   const el = document.createElement('div');
   el.innerHTML = `<div class="alert alert-${level} p-2">${msg}</div>`;
   a.appendChild(el);
-  setTimeout(()=> { a.removeChild(el); }, timeout);
+  setTimeout(()=> { try { a.removeChild(el); } catch(e){} }, timeout);
 }
 
 /* ---- Utils para llamadas al backend (admin) ---- */
@@ -210,7 +260,6 @@ document.getElementById('createForm').addEventListener('submit', async (ev) => {
   if (!r.ok) toast('Error: ' + (r.body.error||'server'), 'danger'); else { toast(`Usuario ${r.body.id} creado/actualizado`,'success'); document.getElementById('inputId').value=''; document.getElementById('inputName').value=''; await renderUsersTable(document.getElementById('filterRole').value); }
 });
 
-/* filter & refresh */
 document.getElementById('filterRole').addEventListener('change', ()=> renderUsersTable(document.getElementById('filterRole').value));
 document.getElementById('refreshUsersBtn').addEventListener('click', ()=> renderUsersTable(document.getElementById('filterRole').value));
 
@@ -228,11 +277,21 @@ async function loadGuardSelect() {
   g.forEach(x => sel.innerHTML += `<option value="${x.id}">${x.id} ${x.name?'- '+x.name:''}</option>`);
 }
 
-async function fetchShifts(activeOnly=false) {
-  const qs = activeOnly ? '?active=true' : '';
+async function fetchShifts(activeOnly=false, startDate=null, endDate=null) {
+  let qs = activeOnly ? '?active=true' : '';
   const r = await adminFetch(`/guardShifts${qs}`, { method:'GET' });
   if (!r.ok) return [];
-  return r.body.data || [];
+  let data = r.body.data || [];
+  // date filtering optional (client-side)
+  if (startDate) {
+    const s = new Date(startDate).getTime();
+    data = data.filter(d => (d.startTimestamp || 0) >= s);
+  }
+  if (endDate) {
+    const e = new Date(endDate).getTime() + 86400000;
+    data = data.filter(d => (d.startTimestamp || 0) <= e);
+  }
+  return data;
 }
 
 function formatTime(ts) { return ts ? new Date(ts).toLocaleString() : '-'; }
@@ -260,9 +319,12 @@ function renderShiftItemHtml(s) {
 }
 
 async function refreshShiftsView() {
-  const active = await fetchShifts(true);
+  const startDate = document.getElementById('filterStartDate').value || null;
+  const endDate = document.getElementById('filterEndDate').value || null;
+
+  const active = await fetchShifts(true, startDate, endDate);
   document.getElementById('activeList').innerHTML = active.length ? active.map(renderShiftItemHtml).join('') : '<div class="muted p-2">No hay guardias en turno</div>';
-  const all = await fetchShifts(false);
+  const all = await fetchShifts(false, startDate, endDate);
   document.getElementById('allList').innerHTML = all.length ? all.map(renderShiftItemHtml).join('') : '<div class="muted p-2">Sin registros</div>';
 
   // attach finalizer handlers
@@ -280,7 +342,6 @@ async function refreshShiftsView() {
   document.querySelectorAll('.view-shift').forEach(b => {
     b.onclick = async () => {
       const id = b.dataset.id;
-      // abrir historial en nueva pestaña user/shift view o modal (aquí simple alert)
       window.open(`shift_history.html?shiftId=${encodeURIComponent(id)}`, '_blank');
     };
   });
@@ -303,26 +364,122 @@ document.getElementById('btnAdminEndShift').addEventListener('click', async () =
 
 document.getElementById('refreshShiftsBtn').addEventListener('click', () => refreshShiftsView());
 
+document.getElementById('btnShowActive').addEventListener('click', () => {
+  document.getElementById('allList').style.display = 'none';
+  document.getElementById('activeList').style.display = 'block';
+});
+document.getElementById('btnShowAll').addEventListener('click', () => {
+  document.getElementById('allList').style.display = 'block';
+  document.getElementById('activeList').style.display = 'block';
+});
+document.getElementById('btnFilterDate').addEventListener('click', () => refreshShiftsView());
+
+/* ===================== HISTORY ===================== */
+async function loadHistoryTable() {
+  const tbody = document.getElementById('historyBody');
+  const guardId = document.getElementById('filterGuardHistory').value.trim();
+  const start = document.getElementById('filterStartHistory').value;
+  const end = document.getElementById('filterEndHistory').value;
+  tbody.innerHTML = '<tr><td colspan="6" class="muted">Cargando...</td></tr>';
+
+  try {
+    const resp = await fetch(`${BACKEND_URL}/history?limit=500`);
+    const js = await resp.json();
+    if (!js.ok) {
+      tbody.innerHTML = `<tr><td colspan="6" class="muted">Error: ${js.error}</td></tr>`;
+      return;
+    }
+
+    let rows = js.data || [];
+
+    // filtrar por guardia
+    if (guardId)
+      rows = rows.filter(r =>
+        (r.guardId && String(r.guardId).includes(guardId)) || r.guardId === guardId
+      );
+
+    // filtrar por fecha (cliente)
+    if (start) {
+      const s = new Date(start).getTime();
+      rows = rows.filter(r => Number(r.timestamp || 0) >= s);
+    }
+    if (end) {
+      const e = new Date(end).getTime() + 86400000;
+      rows = rows.filter(r => Number(r.timestamp || 0) <= e);
+    }
+
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="muted">Sin resultados</td></tr>';
+      return;
+    }
+
+    // render
+    tbody.innerHTML = rows.map(r => {
+      const when = r.timestamp ? new Date(r.timestamp).toLocaleString() : '-';
+      const student = r.studentName || r.id || '-';
+      const guard = r.guardName || r.guardId || '-';
+      const shift = r.shiftId || (r.guardOverrideId ? r.guardOverrideId : '-') ;
+      const motivo = r.reason || '-';
+
+      let resultHtml = '-';
+      if (r.authorized === true)
+        resultHtml = `<span class="badge bg-success">Autorizado</span>`;
+      else if (r.authorized === false)
+        resultHtml = `<span class="badge bg-danger">Rechazado</span>`;
+      else
+        resultHtml = `<span class="badge bg-secondary">${r.reason ? 'Manual' : 'Desconocido'}</span>`;
+
+      return `<tr>
+        <td>${when}</td>
+        <td>${student}</td>
+        <td>${guard}</td>
+        <td class="mono">${shift}</td>
+        <td>${resultHtml}</td>
+        <td>${motivo}</td>
+      </tr>`;
+    }).join('');
+
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="6" class="muted">Error de red: ${e.message || e}</td></tr>`;
+  }
+}
+
+document.getElementById('btnFilterHistory').addEventListener('click', loadHistoryTable);
+
 /* ========== Internal navigation: show/hide sections ========== */
 const sectionUsers = document.getElementById('sectionUsers');
 const sectionShifts = document.getElementById('sectionShifts');
+const sectionHistory = document.getElementById('sectionHistory');
 const btnNavUsers = document.getElementById('btnNavUsers');
 const btnNavShifts = document.getElementById('btnNavShifts');
+const btnNavHistory = document.getElementById('btnNavHistory');
+
+function clearNavStyles() {
+  [btnNavUsers, btnNavShifts, btnNavHistory].forEach(b => {
+    b.classList.remove('btn-primary');
+    b.classList.add('btn-outline-light');
+  });
+}
 
 function showSection(name) {
+  sectionUsers.classList.add('hidden');
+  sectionShifts.classList.add('hidden');
+  sectionHistory.classList.add('hidden');
+  clearNavStyles();
+
   if (name === 'shifts') {
-    sectionUsers.classList.add('hidden');
     sectionShifts.classList.remove('hidden');
-    btnNavUsers.classList.remove('btn-primary'); btnNavUsers.classList.add('btn-outline-light');
-    btnNavShifts.classList.remove('btn-outline-light'); btnNavShifts.classList.add('btn-primary');
-    // load shifts & guards
+    btnNavShifts.classList.add('btn-primary');
     loadGuardSelect(); refreshShiftsView();
     history.replaceState(null, '', '#shifts');
+  } else if (name === 'history') {
+    sectionHistory.classList.remove('hidden');
+    btnNavHistory.classList.add('btn-primary');
+    loadHistoryTable();
+    history.replaceState(null, '', '#history');
   } else {
-    sectionShifts.classList.add('hidden');
     sectionUsers.classList.remove('hidden');
-    btnNavShifts.classList.remove('btn-primary'); btnNavShifts.classList.add('btn-outline-light');
-    btnNavUsers.classList.remove('btn-outline-light'); btnNavUsers.classList.add('btn-primary');
+    btnNavUsers.classList.add('btn-primary');
     renderUsersTable(document.getElementById('filterRole').value);
     history.replaceState(null, '', '#users');
   }
@@ -330,13 +487,15 @@ function showSection(name) {
 
 btnNavUsers.addEventListener('click', ()=> showSection('users'));
 btnNavShifts.addEventListener('click', ()=> showSection('shifts'));
+btnNavHistory.addEventListener('click', ()=> showSection('history'));
 
 /* On load: decide section by hash, load users by default */
 window.addEventListener('load', async () => {
-  // set nav button styles initial
-  btnNavUsers.classList.add('btn-primary'); btnNavShifts.classList.add('btn-outline-light');
+  // minimal initial state
   const h = location.hash.replace('#','');
-  if (h === 'shifts') showSection('shifts'); else showSection('users');
+  if (h === 'shifts') showSection('shifts');
+  else if (h === 'history') showSection('history');
+  else showSection('users');
 });
 
 /* Quick initial loaders */
@@ -348,5 +507,3 @@ window.addEventListener('load', async () => {
 </script>
 </body>
 </html>
-
-
