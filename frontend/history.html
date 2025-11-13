@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Historial de Accesos — Control de Seguridad</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { background:#0b1220; color:#e6eef8; padding:1.25rem; }
+    .card { border-radius:10px; }
+    .muted { color:#9fb0c8; }
+    table td, table th { vertical-align: middle; }
+    .badge-ok { background:#28a745; color:white; }
+    .badge-fail { background:#dc3545; color:white; }
+    .small-token { font-family: monospace; font-size:.95rem; }
+    .nowrap { white-space: nowrap; }
+    .busy { opacity:.6; pointer-events:none; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h3>Historial de Accesos</h3>
+      <div>
+        <a href="index.html" class="btn btn-sm btn-outline-light">Volver al Totem</a>
+        <button id="refreshBtn" class="btn btn-sm btn-outline-light">Actualizar</button>
+        <button id="downloadCsv" class="btn btn-sm btn-primary">Exportar CSV</button>
+      </div>
+    </div>
+
+    <div class="card p-3 mb-3">
+      <div class="row g-2">
+        <div class="col-md-3">
+          <label class="form-label small muted">Buscar por guardia (guardId)</label>
+          <input id="filterGuard" class="form-control" placeholder="Ej: guard-01" />
+        </div>
+        <div class="col-md-3">
+          <label class="form-label small muted">Filtrar por shiftId</label>
+          <input id="filterShift" class="form-control" placeholder="ID de turno (shiftId)" />
+        </div>
+        <div class="col-md-2">
+          <label class="form-label small muted">Resultado</label>
+          <select id="filterResult" class="form-select">
+            <option value="">Todos</option>
+            <option value="ok">Autorizado</option>
+            <option value="denied">Denegado</option>
+          </select>
+        </div>
+        <div class="col-md-2">
+          <label class="form-label small muted">Límite</label>
+          <input id="limit" type="number" min="10" max="500" value="100" class="form-control" />
+        </div>
+        <div class="col-md-2 d-flex align-items-end">
+          <div>
+            <small class="muted">Auto-refresh</small>
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" id="autoRefresh" checked>
+              <label class="form-check-label muted" for="autoRefresh">ON</label>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card p-3 mb-4">
+      <div class="table-responsive" id="tableWrap">
+        <table class="table table-sm table-borderless text-white mb-0">
+          <thead class="muted small">
+            <tr>
+              <th style="width:190px">Hora</th>
+              <th style="width:110px">ID</th>
+              <th>Nombre</th>
+              <th style="width:170px">Token</th>
+              <th style="width:120px">Resultado</th>
+              <th>Motivo</th>
+              <th style="width:140px">Guard / Shift</th>
+            </tr>
+          </thead>
+          <tbody id="historyBody">
+            <tr><td colspan="7" class="muted">Cargando...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="muted small">Nota: este tablero consulta <code>/history?limit=N</code> en tu backend. Actualiza <code>BACKEND_URL</code> en el script si tu servidor está en otro host.</div>
+  </div>
+
+<script>
+  const BACKEND_URL = "http://localhost:3000"; // <--- ajusta si tu backend está en otro host
+  const historyBody = document.getElementById('historyBody');
+  const refreshBtn = document.getElementById('refreshBtn');
+  const downloadCsvBtn = document.getElementById('downloadCsv');
+  const filterGuard = document.getElementById('filterGuard');
+  const filterShift = document.getElementById('filterShift');
+  const filterResult = document.getElementById('filterResult');
+  const limitInput = document.getElementById('limit');
+  const autoRefreshCheckbox = document.getElementById('autoRefresh');
+  let autoInterval = null;
+
+  function formatDate(ts) {
+    try {
+      const d = new Date(Number(ts));
+      return d.toLocaleString();
+    } catch { return String(ts); }
+  }
+
+  function maskToken(t) {
+    if (!t) return '';
+    if (t.length <= 8) return t;
+    return t.slice(0,4) + '…' + t.slice(-4);
+  }
+
+  function createRow(r) {
+    const tr = document.createElement('tr');
+    const time = formatDate(r.timestamp);
+    const id = r.id || r.studentUid || '';
+    const name = r.name || r.studentName || '';
+    const token = r.token || '';
+    const authorized = !!r.authorized;
+    const reason = r.reason || r.message || '';
+    const guard = r.guardId || r.guard || null;
+    const shift = r.shiftId || r.sessionId || null;
+
+    tr.innerHTML = `
+      <td class="nowrap small">${time}</td>
+      <td class="nowrap"><a href="user.html?id=${encodeURIComponent(id)}" target="_blank">${id || ''}</a></td>
+      <td>${name || ''}</td>
+      <td class="small-token">${maskToken(token)}</td>
+      <td>${authorized ? '<span class="badge badge-ok">Autorizado</span>' : '<span class="badge badge-fail">Rechazado</span>'}</td>
+      <td>${reason || ''}</td>
+      <td class="nowrap small">${guard ? guard : ''}${shift ? (guard ? ' / ' : '') + shift : ''}</td>
+    `;
+    return tr;
+  }
+
+  async function fetchHistory() {
+    const limit = Number(limitInput.value) || 100;
+    historyBody.innerHTML = '<tr><td colspan="7" class="muted">Cargando...</td></tr>';
+    try {
+      const res = await fetch(`${BACKEND_URL}/history?limit=${encodeURIComponent(limit)}`);
+      const j = await res.json();
+      if (!j.ok) {
+        historyBody.innerHTML = `<tr><td colspan="7" class="muted">Error al cargar: ${j.error || 'server'}</td></tr>`;
+        return [];
+      }
+      return j.data || [];
+    } catch (e) {
+      historyBody.innerHTML = `<tr><td colspan="7" class="muted">Error de red: ${String(e)}</td></tr>`;
+      return [];
+    }
+  }
+
+  function applyFilters(arr) {
+    const g = filterGuard.value.trim();
+    const s = filterShift.value.trim();
+    const r = filterResult.value;
+    return arr.filter(item => {
+      if (g) {
+        const gid = (item.guardId || item.guard || '') + '';
+        if (!gid.includes(g)) return false;
+      }
+      if (s) {
+        const sid = (item.shiftId || item.sessionId || '') + '';
+        if (!sid.includes(s)) return false;
+      }
+      if (r) {
+        if (r === 'ok' && !item.authorized) return false;
+        if (r === 'denied' && item.authorized) return false;
+      }
+      return true;
+    });
+  }
+
+  async function render() {
+    const data = await fetchHistory();
+    const filtered = applyFilters(data);
+    if (!filtered.length) {
+      historyBody.innerHTML = `<tr><td colspan="7" class="muted">Sin registros</td></tr>`;
+      return;
+    }
+    historyBody.innerHTML = '';
+    filtered.forEach(r => historyBody.appendChild(createRow(r)));
+  }
+
+  // CSV export
+  async function exportCsv() {
+    const data = await fetchHistory();
+    const filtered = applyFilters(data);
+    if (!filtered.length) return alert('No hay datos para exportar');
+    const rows = filtered.map(r => {
+      return {
+        timestamp: formatDate(r.timestamp),
+        id: r.id || r.studentUid || '',
+        name: r.name || r.studentName || '',
+        token: r.token || '',
+        authorized: r.authorized ? 'ok' : 'denied',
+        reason: r.reason || r.message || '',
+        guard: r.guardId || r.guard || '',
+        shift: r.shiftId || r.sessionId || ''
+      };
+    });
+    const csvHeader = Object.keys(rows[0]).join(',') + '\n';
+    const csvBody = rows.map(row => Object.values(row).map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
+    const blob = new Blob([csvHeader + csvBody], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `access-history-${Date.now()}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // Events
+  refreshBtn.addEventListener('click', render);
+  downloadCsvBtn.addEventListener('click', exportCsv);
+  [filterGuard, filterShift, filterResult, limitInput].forEach(el => el.addEventListener('change', render));
+  autoRefreshCheckbox.addEventListener('change', () => {
+    if (autoRefreshCheckbox.checked) {
+      startAuto();
+    } else {
+      stopAuto();
+    }
+  });
+
+  function startAuto() {
+    stopAuto();
+    autoInterval = setInterval(render, 5000); // cada 5s
+  }
+  function stopAuto() {
+    if (autoInterval) clearInterval(autoInterval);
+    autoInterval = null;
+  }
+
+  // init
+  (async () => {
+    await render();
+    if (autoRefreshCheckbox.checked) startAuto();
+  })();
+
+</script>
+</body>
+</html>

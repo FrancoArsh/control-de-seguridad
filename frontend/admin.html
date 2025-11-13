@@ -3,35 +3,43 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Admin - Control de Seguridad</title>
+  <title>Admin — Control de Seguridad (Usuarios & Shifts)</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
     body { background:#0f1724; color:#e6eef8; padding:1rem; }
     .card { border-radius:10px; }
-    .small-token { font-family: monospace; }
-    .qr-img { max-width:160px; border-radius:6px; background:#fff; padding:6px; }
     .muted { color:#9fb0c8; }
-    .role-tabs .btn { min-width:90px; }
-    a { color: #9fd1ff; }
+    .hidden { display:none !important; }
+    .nav-btn { min-width:120px; }
+    .mono { font-family: monospace; }
+    .small-muted { color:#9fb0c8; font-size:.9rem; }
   </style>
 </head>
 <body>
   <div class="container">
-    <div class="card p-3 mb-3">
+
+    <!-- Header + internal nav -->
+    <div class="d-flex align-items-center justify-content-between mb-3">
+      <h3>Admin — Panel</h3>
+      <div>
+        <button id="btnNavUsers" class="btn btn-sm btn-outline-light nav-btn">Usuarios</button>
+        <button id="btnNavShifts" class="btn btn-sm btn-outline-light nav-btn">Turnos</button>
+        <a href="index.html" class="btn btn-sm btn-outline-light">Ir al Totem</a>
+      </div>
+    </div>
+
+    <div id="alertArea"></div>
+
+    <!-- SECTION: USERS (Admin) -->
+    <section id="sectionUsers" class="card p-3 mb-3">
       <div class="d-flex justify-content-between align-items-center mb-2">
-        <h4>Admin — Usuarios</h4>
-        <div>
-          <a href="index.html" class="btn btn-sm btn-outline-light">Ir al Totem</a>
-        </div>
+        <h5 class="m-0">Usuarios (Estudiantes / Docentes / Admins)</h5>
+        <div class="small-muted">Crea, edita, regenera tokens y elimina usuarios</div>
       </div>
 
-      <form id="createForm" class="row g-2">
-        <div class="col-md-3">
-          <input id="inputId" class="form-control" placeholder="ID (opcional para crear)" />
-        </div>
-        <div class="col-md-3">
-          <input id="inputName" class="form-control" placeholder="Nombre" required />
-        </div>
+      <form id="createForm" class="row g-2 mb-3">
+        <div class="col-md-3"><input id="inputId" class="form-control" placeholder="ID (opcional)"></div>
+        <div class="col-md-3"><input id="inputName" class="form-control" placeholder="Nombre" required></div>
         <div class="col-md-2">
           <select id="inputRole" class="form-select">
             <option value="estudiante">Estudiante</option>
@@ -39,252 +47,306 @@
             <option value="admin">Admin</option>
           </select>
         </div>
-        <div class="col-md-2">
-          <button type="submit" class="btn btn-primary">Crear / Actualizar</button>
-        </div>
-        <div class="col-md-2 text-end">
-          <button id="refreshBtn" type="button" class="btn btn-outline-light">Actualizar lista</button>
-        </div>
+        <div class="col-md-2"><button id="createBtn" class="btn btn-primary w-100" type="submit">Crear / Actualizar</button></div>
+        <div class="col-md-2"><button id="refreshUsersBtn" type="button" class="btn btn-outline-light w-100">Actualizar</button></div>
       </form>
-
-      <div id="createResult" class="mt-3"></div>
-      <div class="d-flex justify-content-end text-muted" style="font-size:0.9rem;">
-        Docentes: <span id="teacherCount" style="margin:0 8px;">0</span> |
-        Admins: <span id="adminCount" style="margin-left:8px;">0</span>
-      </div>
-    </div>
-
-    <div class="card p-3 mb-3">
-      <div class="d-flex justify-content-between align-items-center mb-2">
-        <h5>Usuarios registrados</h5>
-        <div class="role-tabs">
-          <button class="btn btn-sm btn-outline-light" data-role="">Todos</button>
-          <button class="btn btn-sm btn-outline-light" data-role="estudiante">Estudiantes</button>
-          <button class="btn btn-sm btn-outline-light" data-role="docente">Docentes</button>
-          <button class="btn btn-sm btn-outline-light" data-role="admin">Admins</button>
-        </div>
-      </div>
 
       <div class="mb-2">
         Filtrar por rol:
         <select id="filterRole" class="form-select form-select-sm" style="width:180px; display:inline-block; margin-left:8px;">
           <option value="">Todos</option>
-          <option value="estudiante">Estudiante</option>
-          <option value="docente">Docente</option>
-          <option value="admin">Admin</option>
+          <option value="estudiante">Estudiantes</option>
+          <option value="docente">Docentes</option>
+          <option value="admin">Admins</option>
         </select>
       </div>
 
-      <div class="table-responsive">
+      <div class="table-responsive mt-2">
         <table class="table table-sm table-borderless text-white">
-          <thead class="muted">
-            <tr>
-              <th>ID</th><th>Nombre</th><th>Rol</th><th>Token</th><th>QR</th><th>Acciones</th>
-            </tr>
-          </thead>
-          <tbody id="usersBody">
-            <tr><td colspan="6" class="muted">Cargando...</td></tr>
-          </tbody>
+          <thead class="muted"><tr><th>ID</th><th>Nombre</th><th>Rol</th><th>Token</th><th>QR</th><th>Acciones</th></tr></thead>
+          <tbody id="usersBody"><tr><td colspan="6" class="muted">Cargando...</td></tr></tbody>
         </table>
       </div>
-    </div>
+    </section>
+
+    <!-- SECTION: SHIFTS (Admin-Shift) -->
+    <section id="sectionShifts" class="card p-3 mb-3 hidden">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <h5 class="m-0">Turnos — Guardias</h5>
+        <div class="small-muted">Inicia / finaliza turnos de guardias y revisa historial por turno</div>
+      </div>
+
+      <div class="row g-2 mb-2">
+        <div class="col-md-3">
+          <select id="guardSelect" class="form-select">
+            <option value="">Selecciona guard</option>
+          </select>
+        </div>
+        <div class="col-md-3">
+          <button id="btnAdminStartShift" class="btn btn-success w-100">Iniciar turno (admin)</button>
+        </div>
+        <div class="col-md-3">
+          <button id="btnAdminEndShift" class="btn btn-danger w-100">Finalizar turno (admin)</button>
+        </div>
+        <div class="col-md-3">
+          <button id="refreshShiftsBtn" class="btn btn-outline-light w-100">Actualizar lista</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="col-md-6">
+          <h6>En turno</h6>
+          <div id="activeList" class="list-group mb-3"></div>
+        </div>
+        <div class="col-md-6">
+          <h6>Todos los shifts recientes</h6>
+          <div id="allList" class="list-group mb-3"></div>
+        </div>
+      </div>
+    </section>
+
   </div>
 
-  <script>
-  /* ---------- CONFIG (cambia solo estas dos constantes según tu entorno) ---------- */
-  const BACKEND_URL = "http://localhost:3000";            // cambia si tu backend está en otro host
-  const ADMIN_SECRET = "mi_secreto_super_seguro";            // 
-  /* -------------------------------------------------------------------------------- */
+<script>
+/* ====== CONFIG: ajusta según tu entorno ====== */
+const BACKEND_URL = "http://localhost:3000";   // cambia si corresponde
+const ADMIN_SECRET = "mi_secreto_super_seguro"; // reemplaza por tu ADMIN_SECRET local (NO subir a repo)
+/* ============================================ */
 
-  // UI elements
-  const createForm = document.getElementById('createForm');
-  const statusEl = document.getElementById('createResult') || document.createElement('div');
-  const usersBody = document.getElementById('usersBody');
-  const filterRole = document.getElementById('filterRole');
-  const refreshBtn = document.getElementById('refreshBtn');
+function toast(msg, level='info', timeout=3500) {
+  const a = document.getElementById('alertArea');
+  const el = document.createElement('div');
+  el.innerHTML = `<div class="alert alert-${level} p-2">${msg}</div>`;
+  a.appendChild(el);
+  setTimeout(()=> { a.removeChild(el); }, timeout);
+}
 
-  let currentFilter = "";
-
-  // Helpers
-  function showMessage(text, level='info', timeout=3500) {
-    statusEl.innerHTML = `<div class="alert alert-${level} p-2">${text}</div>`;
-    setTimeout(()=> { if (statusEl.innerHTML.includes(text)) statusEl.innerHTML = ''; }, timeout);
+/* ---- Utils para llamadas al backend (admin) ---- */
+async function adminFetch(path, opts = {}) {
+  opts.headers = opts.headers || {};
+  opts.headers['x-admin-secret'] = ADMIN_SECRET;
+  opts.headers['Accept'] = 'application/json';
+  if (opts.body && typeof opts.body !== 'string') {
+    opts.body = JSON.stringify(opts.body);
+    opts.headers['Content-Type'] = 'application/json';
   }
+  const res = await fetch(`${BACKEND_URL}${path}`, opts);
+  const json = await res.json().catch(()=>({ ok:false, error:'invalid json' }));
+  return { ok: res.ok, status: res.status, body: json };
+}
 
-  function hideToken(t){ if(!t) return ''; return t.length>8? t.substring(0,4)+'…'+t.slice(-4):t; }
+/* ===================== USERS ===================== */
+async function fetchUsers(role="") {
+  const qs = role ? `?role=${encodeURIComponent(role)}` : '';
+  const r = await adminFetch(`/users${qs}`, { method: 'GET' });
+  if (!r.ok) return { ok:false, error: r.body.error || 'server' };
+  return { ok:true, data: r.body.data || [] };
+}
 
-  // fetch wrapper with admin-secret header
-  async function apiFetch(path, opts = {}) {
-    opts.headers = opts.headers || {};
-    opts.headers['x-admin-secret'] = ADMIN_SECRET;
-    opts.headers['Accept'] = 'application/json';
-    if (opts.body && typeof opts.body !== 'string') {
-      opts.body = JSON.stringify(opts.body);
-      opts.headers['Content-Type'] = 'application/json';
-    }
-    const res = await fetch(`${BACKEND_URL}${path}`, opts);
-    const j = await res.json().catch(()=>({ ok:false, error:'invalid json' }));
-    if (!res.ok && j && (j.error === 'unauthorized' || j.error === 'unauthenticated')) {
-      return { ok:false, error: 'unauthorized' };
-    }
-    return j;
-  }
-
-  // Create or update any role
-  async function createOrUpdateUser(id, name, role) {
-    if (!name) return { ok:false, error:'name required' };
-    return await apiFetch('/users', { method: 'POST', body: { id: id || undefined, name, role }});
-  }
-
-  // Fetch users (role optional)
-  async function fetchUsers(role="") {
-    try {
-      const qs = role ? `?role=${encodeURIComponent(role)}` : '';
-      const j = await apiFetch(`/users${qs}`, { method: 'GET' });
-      if (!j.ok) {
-        usersBody.innerHTML = `<tr><td colspan="6" class="muted">Error al cargar usuarios: ${j.error || 'server'}</td></tr>`;
-        return [];
-      }
-      return j.data || [];
-    } catch (e) {
-      usersBody.innerHTML = `<tr><td colspan="6" class="muted">Error de red</td></tr>`;
-      return [];
-    }
-  }
-
-  // Render table
-  async function renderUsersTable(roleFilter="") {
-    usersBody.innerHTML = '<tr><td colspan="6" class="muted">Cargando...</td></tr>';
-    const rows = await fetchUsers(roleFilter);
-    if (!rows.length) {
-      usersBody.innerHTML = `<tr><td colspan="6" class="muted">Sin usuarios</td></tr>`;
-      return;
-    }
-    usersBody.innerHTML = '';
-    rows.forEach(r => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td><a href="user.html?id=${encodeURIComponent(r.id)}" target="_blank">${r.id}</a></td>
-        <td>${r.name || ''}</td>
-        <td>${r.role || ''}</td>
-        <td class="small-token">${hideToken(r.token)}</td>
-        <td>${r.qrDataUrl ? `<img src="${r.qrDataUrl}" style="max-width:120px;">` : ''}</td>
-        <td>
-          <button class="btn btn-sm btn-outline-light edit-btn" data-id="${r.id}" data-name="${r.name || ''}" data-role="${r.role || ''}">Editar</button>
-          <button class="btn btn-sm btn-outline-light regen-btn" data-id="${r.id}">Regenerar</button>
-          <button class="btn btn-sm btn-danger del-btn" data-id="${r.id}">Eliminar</button>
-        </td>
-      `;
-      usersBody.appendChild(tr);
-    });
-
-    // listeners
-    document.querySelectorAll('.edit-btn').forEach(b => {
-      b.onclick = () => {
-        document.getElementById('inputId').value = b.dataset.id || '';
-        document.getElementById('inputName').value = b.dataset.name || '';
-        document.getElementById('inputRole').value = b.dataset.role || 'estudiante';
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-      };
-    });
-
-    document.querySelectorAll('.regen-btn').forEach(b => {
-      b.onclick = async () => {
-        const id = b.dataset.id;
-        if (!confirm(`Regenerar token para ${id}?`)) return;
-        b.disabled = true;
-        const res = await apiFetch('/users', { method: 'POST', body: { id, regenerate: true }});
-        if (res.ok) {
-          showMessage(`Token regenerado para ${id}`, 'success');
-          await refreshAll();
-        } else {
-          showMessage(`Error: ${res.error || 'server'}`, 'danger');
-        }
-        b.disabled = false;
-      };
-    });
-
-    document.querySelectorAll('.del-btn').forEach(b => {
-      b.onclick = async () => {
-        const id = b.dataset.id;
-        if (!confirm(`Eliminar ${id}? Esto borrará student y token.`)) return;
-        b.disabled = true;
-        const res = await apiFetch(`/users/${encodeURIComponent(id)}`, { method: 'DELETE' });
-        if (res.ok) {
-          showMessage(`Usuario ${id} eliminado`, 'success');
-          await refreshAll();
-        } else {
-          showMessage(`Error: ${res.error || 'server'}`, 'danger');
-        }
-        b.disabled = false;
-      };
-    });
-  }
-
-  // Counts for docentes/admins
-  async function loadCounts() {
-    try {
-      const t = await apiFetch('/users?role=docente', { method: 'GET' });
-      const a = await apiFetch('/users?role=admin', { method: 'GET' });
-      document.getElementById('teacherCount').innerText = (t && t.count) ? t.count : 0;
-      document.getElementById('adminCount').innerText = (a && a.count) ? a.count : 0;
-    } catch (e) { /* ignore */ }
-  }
-
-  async function refreshAll() {
-    await renderUsersTable(currentFilter);
-    await loadCounts();
-  }
-
-  // form submit
-  createForm.addEventListener('submit', async (ev) => {
-    ev.preventDefault();
-    const id = document.getElementById('inputId').value.trim();
-    const name = document.getElementById('inputName').value.trim();
-    const role = document.getElementById('inputRole').value || 'estudiante';
-    if (!name) { showMessage('Nombre requerido', 'warning'); return; }
-    showMessage('Creando/Actualizando...', 'info', 2000);
-    const res = await createOrUpdateUser(id, name, role);
-    if (res.ok) {
-      showMessage(`Usuario ${res.id} creado/actualizado (${role})`, 'success');
-      document.getElementById('inputId').value = '';
-      document.getElementById('inputName').value = '';
-      await refreshAll();
-    } else {
-      if (res.error === 'unauthorized') showMessage('Error: unauthorized. Verifica ADMIN_SECRET', 'danger', 7000);
-      else showMessage(`Error: ${res.error || 'server'}`, 'danger', 5000);
-    }
+async function renderUsersTable(roleFilter="") {
+  const tbody = document.getElementById('usersBody');
+  tbody.innerHTML = '<tr><td colspan="6" class="muted">Cargando...</td></tr>';
+  const r = await fetchUsers(roleFilter);
+  if (!r.ok) { tbody.innerHTML = `<tr><td colspan="6" class="muted">Error: ${r.error}</td></tr>`; return; }
+  const rows = r.data;
+  if (!rows.length) { tbody.innerHTML = `<tr><td colspan="6" class="muted">Sin usuarios</td></tr>`; return; }
+  tbody.innerHTML = '';
+  rows.forEach(u => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><a href="user.html?id=${encodeURIComponent(u.id)}" target="_blank">${u.id}</a></td>
+      <td>${u.name || ''}</td>
+      <td>${u.role || ''}</td>
+      <td class="mono">${u.token ? u.token.slice(0,6) + '…' : ''}</td>
+      <td>${u.token ? `<img src="${u.qrDataUrl||''}" style="max-width:120px">` : ''}</td>
+      <td>
+        <button class="btn btn-sm btn-outline-light edit-btn" data-id="${u.id}" data-name="${encodeURIComponent(u.name||'')}" data-role="${u.role}">Editar</button>
+        <button class="btn btn-sm btn-outline-light regen-btn" data-id="${u.id}">Regenerar</button>
+        <button class="btn btn-sm btn-danger del-btn" data-id="${u.id}">Eliminar</button>
+      </td>
+    `;
+    tbody.appendChild(tr);
   });
 
-  // filter role
-  filterRole?.addEventListener('change', async (e) => {
-    currentFilter = e.target.value || "";
-    await renderUsersTable(currentFilter);
+  // listeners
+  document.querySelectorAll('.edit-btn').forEach(b => {
+    b.onclick = () => {
+      document.getElementById('inputId').value = b.dataset.id || '';
+      document.getElementById('inputName').value = decodeURIComponent(b.dataset.name || '');
+      document.getElementById('inputRole').value = b.dataset.role || 'estudiante';
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    };
+  });
+  document.querySelectorAll('.regen-btn').forEach(b => {
+    b.onclick = async () => {
+      const id = b.dataset.id;
+      if (!confirm(`Regenerar token para ${id}?`)) return;
+      b.disabled = true;
+      const r = await adminFetch('/users', { method:'POST', body: { id, regenerate: true }});
+      if (!r.ok) toast('Error regenerando: ' + (r.body.error||'server'), 'danger'); else { toast('Token regenerado', 'success'); await renderUsersTable(document.getElementById('filterRole').value); }
+      b.disabled = false;
+    };
+  });
+  document.querySelectorAll('.del-btn').forEach(b => {
+    b.onclick = async () => {
+      const id = b.dataset.id;
+      if (!confirm(`Eliminar usuario ${id}?`)) return;
+      b.disabled = true;
+      const r = await adminFetch(`/users/${encodeURIComponent(id)}`, { method:'DELETE' });
+      if (!r.ok) toast('Error eliminando: '+(r.body.error||'server'),'danger'); else { toast('Usuario eliminado','success'); await renderUsersTable(document.getElementById('filterRole').value); }
+      b.disabled = false;
+    };
+  });
+}
+
+/* Create/Update form */
+document.getElementById('createForm').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const id = document.getElementById('inputId').value.trim();
+  const name = document.getElementById('inputName').value.trim();
+  const role = document.getElementById('inputRole').value;
+  if (!name) { toast('Nombre requerido','warning'); return; }
+  const r = await adminFetch('/users', { method: 'POST', body: { id: id || undefined, name, role }});
+  if (!r.ok) toast('Error: ' + (r.body.error||'server'), 'danger'); else { toast(`Usuario ${r.body.id} creado/actualizado`,'success'); document.getElementById('inputId').value=''; document.getElementById('inputName').value=''; await renderUsersTable(document.getElementById('filterRole').value); }
+});
+
+/* filter & refresh */
+document.getElementById('filterRole').addEventListener('change', ()=> renderUsersTable(document.getElementById('filterRole').value));
+document.getElementById('refreshUsersBtn').addEventListener('click', ()=> renderUsersTable(document.getElementById('filterRole').value));
+
+/* ===================== SHIFTS ===================== */
+async function fetchGuardsList() {
+  const r = await adminFetch('/guards', { method: 'GET' });
+  if (!r.ok) return [];
+  return r.body.data || [];
+}
+
+async function loadGuardSelect() {
+  const g = await fetchGuardsList();
+  const sel = document.getElementById('guardSelect');
+  sel.innerHTML = '<option value="">Selecciona guard</option>';
+  g.forEach(x => sel.innerHTML += `<option value="${x.id}">${x.id} ${x.name?'- '+x.name:''}</option>`);
+}
+
+async function fetchShifts(activeOnly=false) {
+  const qs = activeOnly ? '?active=true' : '';
+  const r = await adminFetch(`/guardShifts${qs}`, { method:'GET' });
+  if (!r.ok) return [];
+  return r.body.data || [];
+}
+
+function formatTime(ts) { return ts ? new Date(ts).toLocaleString() : '-'; }
+
+function renderShiftItemHtml(s) {
+  const start = formatTime(s.startTimestamp);
+  const end = s.endTimestamp ? formatTime(s.endTimestamp) : null;
+  const status = (!s.endTimestamp && s.active !== false) ? 'En turno' : 'Fuera de turno';
+  const badge = status === 'En turno' ? 'badge bg-success' : 'badge bg-secondary';
+  return `
+    <div class="list-group-item d-flex justify-content-between align-items-start">
+      <div>
+        <div><strong>${s.guardId}</strong> ${s.guardName ? '- ' + s.guardName : ''}</div>
+        <div class="small text-muted">Inicio: ${start} ${end ? ' • Fin: ' + end : ''}</div>
+      </div>
+      <div class="text-end">
+        <div><span class="${badge}">${status}</span></div>
+        <div class="mt-2">
+          ${status === 'En turno' ? `<button class="btn btn-sm btn-outline-light end-shift" data-id="${s.id}">Finalizar</button>` : ''}
+          <button class="btn btn-sm btn-outline-light view-shift" data-id="${s.id}">Ver</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function refreshShiftsView() {
+  const active = await fetchShifts(true);
+  document.getElementById('activeList').innerHTML = active.length ? active.map(renderShiftItemHtml).join('') : '<div class="muted p-2">No hay guardias en turno</div>';
+  const all = await fetchShifts(false);
+  document.getElementById('allList').innerHTML = all.length ? all.map(renderShiftItemHtml).join('') : '<div class="muted p-2">Sin registros</div>';
+
+  // attach finalizer handlers
+  document.querySelectorAll('.end-shift').forEach(b => {
+    b.onclick = async () => {
+      const id = b.dataset.id;
+      if (!confirm('Finalizar shift '+id+' ?')) return;
+      b.disabled = true;
+      const r = await adminFetch('/admin/guard/shift/end', { method:'POST', body: { shiftId: id }});
+      if (!r.ok) toast('Error finalizando: ' + (r.body.error||'server'), 'danger'); else { toast('Shift finalizado','success'); await refreshShiftsView(); }
+      b.disabled = false;
+    };
   });
 
-  // role tab buttons
-  document.querySelectorAll('.role-tabs button').forEach(btn=>{
-    btn.addEventListener('click', async (ev)=>{
-      const r = btn.dataset.role || '';
-      filterRole.value = r;
-      currentFilter = r;
-      await renderUsersTable(currentFilter);
-    });
+  document.querySelectorAll('.view-shift').forEach(b => {
+    b.onclick = async () => {
+      const id = b.dataset.id;
+      // abrir historial en nueva pestaña user/shift view o modal (aquí simple alert)
+      window.open(`shift_history.html?shiftId=${encodeURIComponent(id)}`, '_blank');
+    };
   });
+}
 
-  // refresh button
-  refreshBtn?.addEventListener('click', () => refreshAll());
+/* Admin start/end shift for selected guard (buttons) */
+document.getElementById('btnAdminStartShift').addEventListener('click', async () => {
+  const guardId = document.getElementById('guardSelect').value;
+  if (!guardId) { toast('Selecciona un guard','warning'); return; }
+  const r = await adminFetch('/admin/guard/shift/start', { method:'POST', body: { guardId }});
+  if (!r.ok) toast('Error iniciando shift: ' + (r.body.error||'server'), 'danger'); else { toast('Shift iniciado: ' + r.body.shiftId, 'success'); await refreshShiftsView(); }
+});
 
-  // initial load
-  window.addEventListener('load', async () => {
-    await refreshAll();
-  });
+document.getElementById('btnAdminEndShift').addEventListener('click', async () => {
+  const guardId = document.getElementById('guardSelect').value;
+  if (!guardId) { toast('Selecciona un guard','warning'); return; }
+  const r = await adminFetch('/admin/guard/shift/end', { method:'POST', body: { guardId }});
+  if (!r.ok) toast('Error finalizando shift: ' + (r.body.error||'server'), 'danger'); else { toast('Shift finalizado','success'); await refreshShiftsView(); }
+});
 
-  // expose helper for form use
-  async function createOrUpdateUser(id, name, role) {
-    return await apiFetch('/users', { method: 'POST', body: { id: id || undefined, name, role }});
+document.getElementById('refreshShiftsBtn').addEventListener('click', () => refreshShiftsView());
+
+/* ========== Internal navigation: show/hide sections ========== */
+const sectionUsers = document.getElementById('sectionUsers');
+const sectionShifts = document.getElementById('sectionShifts');
+const btnNavUsers = document.getElementById('btnNavUsers');
+const btnNavShifts = document.getElementById('btnNavShifts');
+
+function showSection(name) {
+  if (name === 'shifts') {
+    sectionUsers.classList.add('hidden');
+    sectionShifts.classList.remove('hidden');
+    btnNavUsers.classList.remove('btn-primary'); btnNavUsers.classList.add('btn-outline-light');
+    btnNavShifts.classList.remove('btn-outline-light'); btnNavShifts.classList.add('btn-primary');
+    // load shifts & guards
+    loadGuardSelect(); refreshShiftsView();
+    history.replaceState(null, '', '#shifts');
+  } else {
+    sectionShifts.classList.add('hidden');
+    sectionUsers.classList.remove('hidden');
+    btnNavShifts.classList.remove('btn-primary'); btnNavShifts.classList.add('btn-outline-light');
+    btnNavUsers.classList.remove('btn-outline-light'); btnNavUsers.classList.add('btn-primary');
+    renderUsersTable(document.getElementById('filterRole').value);
+    history.replaceState(null, '', '#users');
   }
-  </script>
+}
+
+btnNavUsers.addEventListener('click', ()=> showSection('users'));
+btnNavShifts.addEventListener('click', ()=> showSection('shifts'));
+
+/* On load: decide section by hash, load users by default */
+window.addEventListener('load', async () => {
+  // set nav button styles initial
+  btnNavUsers.classList.add('btn-primary'); btnNavShifts.classList.add('btn-outline-light');
+  const h = location.hash.replace('#','');
+  if (h === 'shifts') showSection('shifts'); else showSection('users');
+});
+
+/* Quick initial loaders */
+(async function init() {
+  await renderUsersTable('');
+  await loadGuardSelect();
+  await refreshShiftsView();
+})();
+</script>
 </body>
 </html>
+
 

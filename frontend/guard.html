@@ -5,108 +5,266 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Guard - Control de Seguridad</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-  <style> body{background:#0f1724;color:#e6eef8;padding:1rem} .card{border-radius:10px} .muted{color:#9fb0c8} </style>
+  <style>
+    body { background:#0f1724; color:#e6eef8; padding:1rem; }
+    .card { border-radius:10px; }
+    .muted { color:#9fb0c8; }
+    .small-muted { font-size:.9rem; color:#9fb0c8; }
+    .btn-ghost { background: transparent; border: 1px solid rgba(255,255,255,0.06); color: #e6eef8; }
+    .grid { display:grid; gap:.5rem; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); }
+    .mono { font-family: monospace; }
+  </style>
 </head>
 <body>
   <div class="container">
+
+    <!-- LOGIN -->
     <div class="card p-3 mb-3">
-      <h4>Guard Login</h4>
-      <div id="loginResult"></div>
-      <div class="row g-2">
-        <div class="col-md-3"><input id="guardId" class="form-control" placeholder="ID guardia (ej: guard-03)"></div>
-        <div class="col-md-3"><input id="guardPin" class="form-control" placeholder="PIN"></div>
-        <div class="col-md-3"><button id="btnLogin" class="btn btn-primary">Login</button></div>
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <h4 class="m-0">Guard — Login</h4>
+        <div class="small-muted">Ingresa con tu ID y PIN</div>
       </div>
+
+      <form id="loginForm" class="row g-2 align-items-center">
+        <div class="col-md-4">
+          <input id="inputGuardId" class="form-control" placeholder="ID guardia (ej: guard-01)" autocomplete="username">
+        </div>
+        <div class="col-md-3">
+          <input id="inputPin" type="password" class="form-control" placeholder="PIN" autocomplete="current-password">
+        </div>
+        <div class="col-md-2">
+          <button id="btnLogin" class="btn btn-primary w-100" type="submit">Ingresar</button>
+        </div>
+        <div class="col-md-3 text-end">
+          <button id="btnLogout" class="btn btn-ghost" type="button" title="Cerrar sesión local">Cerrar sesión</button>
+        </div>
+      </form>
+
+      <div id="guardMsg" class="mt-2"></div>
     </div>
 
+    <!-- TURNOS -->
     <div class="card p-3 mb-3">
-      <h5>Shift control</h5>
-      <div id="shiftResult" class="mb-2"></div>
-      <div id="shiftPanel" style="display:none;">
-        <div>Guard: <b id="guardName"></b> (<span id="guardIdShow"></span>)</div>
-        <div class="mt-2">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <h5 class="m-0">Control de Turno</h5>
+        <div class="small-muted">Estado de sesión y acciones del guardia</div>
+      </div>
+
+      <div class="row g-2 align-items-center">
+        <div class="col-md-4">
+          <div>Guard: <span id="guardLabel" class="mono">— no logueado —</span></div>
+          <div class="small-muted">Token guard (no mostrado completo)</div>
+        </div>
+
+        <div class="col-md-8 d-flex gap-2 justify-content-end">
           <button id="btnStartShift" class="btn btn-success">Iniciar turno</button>
           <button id="btnEndShift" class="btn btn-danger">Finalizar turno</button>
-          <span class="muted ms-3">Shift actual: <span id="currentShift">-</span></span>
         </div>
       </div>
+
+      <div id="adminShiftMsg" class="mt-2"></div>
     </div>
 
+    <!-- ACCIONES RÁPIDAS -->
     <div class="card p-3 mb-3">
-      <h5>Acciones rápidas</h5>
-      <div class="muted">Puedes iniciar turno y luego usar el Totem para autorizar manualmente (o usar este panel para pruebas).</div>
-      <div class="mt-2">
-        <input id="manualStudentId" class="form-control d-inline-block" style="width:250px" placeholder="studentId (opcional)">
-        <input id="manualToken" class="form-control d-inline-block ms-2" style="width:250px" placeholder="token (opcional)">
-        <button id="btnManualAuthorize" class="btn btn-primary ms-2">Autorizar manual</button>
+      <h5 class="m-0">Acciones rápidas (Autorización manual)</h5>
+      <p class="small-muted">Usa esto si un estudiante no puede pasar con su QR. El guardia debe estar logueado.</p>
+
+      <div class="grid mt-2">
+        <input id="manualStudentId" class="form-control" placeholder="studentId (ej: est-20231101-abc123)">
+        <input id="manualToken" class="form-control" placeholder="token (opcional si usarás studentId)">
+        <input id="manualNote" class="form-control" placeholder="Nota (ej: override por QR dañado)">
       </div>
+
+      <div class="d-flex gap-2 mt-3">
+        <button id="btnManualAuthorize" class="btn btn-primary">Autorizar manual (guard)</button>
+        <button id="btnManualAuthorizeByToken" class="btn btn-outline-light">Autorizar por token</button>
+      </div>
+
       <div id="manualRes" class="mt-2"></div>
+    </div>
+
+    <!-- INFO / AYUDA -->
+    <div class="card p-3 mb-3">
+      <div class="small-muted">
+        Notas rápidas:
+        <ul>
+          <li>No expongas el ADMIN_SECRET en el frontend.</li>
+          <li>El guard debe existir en Firebase bajo `/guards/{id}` con `pinHash` (bcrypt).</li>
+          <li>Puedes crear guards con el endpoint <code>/guards/create</code> desde backend o usar tu script.</li>
+        </ul>
+      </div>
     </div>
 
   </div>
 
 <script>
-const BACKEND_URL = "http://localhost:3000";
+/* CONFIG */
+const BACKEND_URL = "http://localhost:3000"; // <--- cambia si tu backend no está en local
+const LOGIN_KEY = "guard_auth_token";
+const LOGIN_GUARD_ID = "guard_auth_guardid";
 
-function show(el, msg, cls='info') { el.innerHTML = `<div class="alert alert-${cls} p-2">${msg}</div>`; setTimeout(()=>el.innerHTML='',5000); }
-
-async function guardLogin(id,pin) {
-  const r = await fetch(BACKEND_URL + '/guard/login', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id,pin})});
-  return await r.json();
+/* HELPERS UI */
+function show(elSelectorOrNode, msg, level='info', autoHide=5000) {
+  const el = (typeof elSelectorOrNode === 'string') ? document.querySelector(elSelectorOrNode) : elSelectorOrNode;
+  if (!el) return console.log(msg);
+  el.innerHTML = `<div class="alert alert-${level} p-2">${msg}</div>`;
+  if (autoHide) setTimeout(()=> { if (el.innerHTML.includes(msg)) el.innerHTML = ''; }, autoHide);
 }
 
-document.getElementById('btnLogin').onclick = async () => {
-  const id = document.getElementById('guardId').value.trim();
-  const pin = document.getElementById('guardPin').value.trim();
-  if (!id || !pin) return show(document.getElementById('loginResult'), 'ID y PIN requeridos','warning');
-  const res = await guardLogin(id,pin);
-  if (!res.ok) return show(document.getElementById('loginResult'), 'Login falló: ' + (res.error||'error'),'danger');
-  localStorage.guardToken = res.token;
-  localStorage.guardId = res.guardId;
-  document.getElementById('guardName').innerText = res.name;
-  document.getElementById('guardIdShow').innerText = res.guardId;
-  document.getElementById('shiftPanel').style.display = 'block';
-  show(document.getElementById('loginResult'), 'Login ok','success');
-  // restore current shift if any
-  if (localStorage.currentShift) document.getElementById('currentShift').innerText = localStorage.currentShift;
-};
+function clearMsg(selector) { const el = document.querySelector(selector); if (el) el.innerHTML = ''; }
 
-document.getElementById('btnStartShift').onclick = async () => {
-  const token = localStorage.guardToken;
-  if (!token) return show(document.getElementById('shiftResult'), 'Debes logearte primero','warning');
-  const r = await fetch(BACKEND_URL + '/guard/shift/start', { method:'POST', headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer '+token }, body: JSON.stringify({ notes: 'start via GUI' })});
-  const j = await r.json();
-  if (!j.ok) return show(document.getElementById('shiftResult'), 'Error: '+(j.error||'server'),'danger');
-  localStorage.currentShift = j.shiftId;
-  document.getElementById('currentShift').innerText = j.shiftId;
-  show(document.getElementById('shiftResult'), 'Turno iniciado','success');
-};
+function getAuthToken() { return localStorage.getItem(LOGIN_KEY); }
+function getGuardId() { return localStorage.getItem(LOGIN_GUARD_ID); }
+function setAuth(token, guardId) { localStorage.setItem(LOGIN_KEY, token); localStorage.setItem(LOGIN_GUARD_ID, guardId); }
+function clearAuth() { localStorage.removeItem(LOGIN_KEY); localStorage.removeItem(LOGIN_GUARD_ID); }
 
-document.getElementById('btnEndShift').onclick = async () => {
-  const token = localStorage.guardToken;
-  const shiftId = localStorage.currentShift;
-  if (!token || !shiftId) return show(document.getElementById('shiftResult'), 'No hay turno activo','warning');
-  const r = await fetch(BACKEND_URL + '/guard/shift/end', { method:'POST', headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer '+token }, body: JSON.stringify({ shiftId })});
-  const j = await r.json();
-  if (!j.ok) return show(document.getElementById('shiftResult'), 'Error: '+(j.error||'server'),'danger');
-  show(document.getElementById('shiftResult'), 'Turno finalizado','success');
-  localStorage.removeItem('currentShift');
-  document.getElementById('currentShift').innerText = '-';
-};
+/* UI init */
+function updateGuardLabel() {
+  const lbl = document.getElementById('guardLabel');
+  const id = getGuardId();
+  if (id) lbl.textContent = id;
+  else lbl.textContent = '— no logueado —';
+}
 
-// manual authorize (for quick test)
-document.getElementById('btnManualAuthorize').onclick = async () => {
-  const token = localStorage.guardToken;
-  const shiftId = localStorage.currentShift || null;
-  if (!token) return show(document.getElementById('manualRes'), 'Debes logearte primero','warning');
-  const studentId = document.getElementById('manualStudentId').value.trim() || null;
-  const tokenVal = document.getElementById('manualToken').value.trim() || null;
-  if (!studentId && !tokenVal) return show(document.getElementById('manualRes'), 'Id o token requerido','warning');
-  const r = await fetch(BACKEND_URL + '/guard/authorize', { method:'POST', headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer '+token }, body: JSON.stringify({ studentId, token: tokenVal, shiftId, note: 'manual via GUI' })});
-  const j = await r.json();
-  if (!j.ok) return show(document.getElementById('manualRes'), 'Error: '+(j.error||'server'),'danger');
-  show(document.getElementById('manualRes'), 'Autorización registrada','success');
-};
+/* LOGIN */
+async function doGuardLogin(id, pin) {
+  try {
+    const resp = await fetch(`${BACKEND_URL}/guard/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, pin })
+    });
+    const js = await resp.json().catch(()=>({ ok:false, error:'invalid json' }));
+    if (!resp.ok || !js.ok) {
+      show('#guardMsg', `Login falló: ${js.error || js.message || 'server'}`, 'danger');
+      return false;
+    }
+    // Guardar token y guardId
+    setAuth(js.token, js.guardId || id);
+    updateGuardLabel();
+    show('#guardMsg', `Login OK — bienvenido ${js.name || js.guardId || id}`, 'success', 3000);
+    // redirigir (si quieres) window.location.href = 'admin-shift.html';
+    return true;
+  } catch (e) {
+    show('#guardMsg', 'Error de red: ' + (e.message || e), 'danger');
+    return false;
+  }
+}
+
+/* START / END SHIFT (require Guard JWT) */
+async function startShift() {
+  const token = getAuthToken();
+  if (!token) { show('#adminShiftMsg','No estás logueado. Haz login primero.','warning'); return; }
+  show('#adminShiftMsg','Iniciando turno...','info');
+  try {
+    const resp = await fetch(`${BACKEND_URL}/guard/shift/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ notes: 'Inicio desde UI guard' })
+    });
+    const js = await resp.json().catch(()=>({ ok:false, error:'invalid json' }));
+    if (!resp.ok || !js.ok) {
+      show('#adminShiftMsg', `Error al iniciar turno: ${js.error || JSON.stringify(js)}`, 'danger');
+      return;
+    }
+    show('#adminShiftMsg', `Turno iniciado ✅ shiftId: ${js.shiftId}`, 'success', 4000);
+    // opcional: refrescar lista de shifts si tienes una función
+  } catch (e) {
+    show('#adminShiftMsg', 'Error de red: ' + (e.message||e), 'danger');
+  }
+}
+
+async function endShift() {
+  const token = getAuthToken();
+  if (!token) { show('#adminShiftMsg','No estás logueado.','warning'); return; }
+  show('#adminShiftMsg','Finalizando turno...','info');
+  try {
+    const resp = await fetch(`${BACKEND_URL}/guard/shift/end`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({}) // cierra el shift más reciente del guard
+    });
+    const js = await resp.json().catch(()=>({ ok:false, error:'invalid json' }));
+    if (!resp.ok || !js.ok) {
+      show('#adminShiftMsg', `Error al finalizar turno: ${js.error || JSON.stringify(js)}`, 'danger');
+      return;
+    }
+    show('#adminShiftMsg', `Turno finalizado ✅ shiftId: ${js.shiftId}`, 'success', 4000);
+  } catch (e) {
+    show('#adminShiftMsg', 'Error de red: ' + (e.message||e), 'danger');
+  }
+}
+
+/* MANUAL AUTHORIZE (guard override) */
+async function manualAuthorize({ studentId=null, token=null, note='' } = {}) {
+  const guardToken = getAuthToken();
+  if (!guardToken) { show('#manualRes','No autenticado. Haz login primero.','warning'); return; }
+  if (!studentId && !token) { show('#manualRes','Ingresa studentId o token.','warning'); return; }
+  show('#manualRes','Enviando autorización...','info');
+  try {
+    const resp = await fetch(`${BACKEND_URL}/guard/authorize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + guardToken },
+      body: JSON.stringify({ guardId: getGuardId(), studentId: studentId || undefined, token: token || undefined, note })
+    });
+    const js = await resp.json().catch(()=>({ ok:false, error:'invalid json' }));
+    if (!resp.ok || !js.ok) {
+      show('#manualRes', `Error: ${js.error || JSON.stringify(js)}`, 'danger');
+      return;
+    }
+    show('#manualRes', `Autorizado manual ✅ authId: ${js.authId}`, 'success', 4000);
+  } catch (e) {
+    show('#manualRes','Error de red: '+(e.message||e),'danger');
+  }
+}
+
+/* LOGOUT */
+function doLogout() {
+  clearAuth();
+  updateGuardLabel();
+  show('#guardMsg','Sesión cerrada localmente.','info',2000);
+}
+
+/* HANDLERS DOM */
+document.addEventListener('DOMContentLoaded', () => {
+  updateGuardLabel();
+
+  // Submit login
+  document.getElementById('loginForm').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const id = document.getElementById('inputGuardId').value.trim();
+    const pin = document.getElementById('inputPin').value.trim();
+    if (!id || !pin) { show('#guardMsg','ID y PIN requeridos','warning'); return; }
+    await doGuardLogin(id, pin);
+  });
+
+  // Start / End buttons
+  document.getElementById('btnStartShift').addEventListener('click', (e) => {
+    e.preventDefault(); startShift();
+  });
+  document.getElementById('btnEndShift').addEventListener('click', (e) => {
+    e.preventDefault(); endShift();
+  });
+
+  // Manual authorize buttons
+  document.getElementById('btnManualAuthorize').addEventListener('click', async (e) => {
+    e.preventDefault();
+    const studentId = document.getElementById('manualStudentId').value.trim() || null;
+    const note = document.getElementById('manualNote').value.trim() || '';
+    await manualAuthorize({ studentId, token: null, note });
+  });
+
+  document.getElementById('btnManualAuthorizeByToken').addEventListener('click', async (e) => {
+    e.preventDefault();
+    const token = document.getElementById('manualToken').value.trim() || null;
+    const note = document.getElementById('manualNote').value.trim() || '';
+    await manualAuthorize({ studentId: null, token, note });
+  });
+
+  // Logout
+  document.getElementById('btnLogout').addEventListener('click', (e) => { e.preventDefault(); doLogout(); });
+});
 </script>
 </body>
 </html>

@@ -13,6 +13,13 @@ import bcrypt from "bcrypt";
 
 dotenv.config();
 
+
+console.log('DEBUG cwd:', process.cwd());
+console.log('DEBUG __dirname:', __dirname);
+console.log('DEBUG FIREBASE_DATABASE_URL:', process.env.FIREBASE_DATABASE_URL);
+console.log('DEBUG serviceAccount path:', path.resolve(__dirname, '../serviceAccountKey.json'));
+
+
 /* --------------------
    Verificaciones de env / secret
    -------------------- */
@@ -489,67 +496,139 @@ app.delete("/users/:id", requireAdmin, async (req, res) => {
 
 // guard/login
 // --- GUARD AUTH / LOGIN ---
-app.post('/guard/login', async (req, res) => {
+// --- GUARD AUTH / LOGIN (mejorado, reemplaza tu versión actual) ---
+app.post("/guard/login", async (req, res) => {
   try {
-    const { id, pin } = req.body;
-    const snap = await db.ref(`guards/${id}`).get();
-    if (!snap.exists()) return res.status(404).json({ ok: false, error: 'guard not found' });
+    let { id, pin } = req.body || {};
+    if (!id || (pin === undefined || pin === null)) return res.status(400).json({ ok: false, error: "id & pin required" });
+
+    // Normalizar pin como string y trim
+    const pinStr = String(pin).trim();
+
+    console.log('LOGIN ATTEMPT -> id:', id, 'pin_len:', pinStr.length);
+
+    const snap = await db.ref(`guards/${id}`).once("value");
+    console.log('LOGIN DEBUG - snap.exists:', snap.exists());
+
+    if (!snap.exists()) {
+      console.log('LOGIN DEBUG -> guard not found for id:', id);
+      return res.status(404).json({ ok: false, error: "guard not found" });
+    }
 
     const guard = snap.val();
-    const valid = await bcrypt.compare(pin, guard.pinHash);
-    if (!valid) return res.status(401).json({ ok: false, error: 'invalid pin' });
+    const storedHash = guard.pinHash || guard.pin || null;
+    console.log('LOGIN DEBUG - guard record name:', guard.name || null);
+    console.log('LOGIN DEBUG - pinHash exists:', !!storedHash, 'prefix:', storedHash ? String(storedHash).slice(0,6) : null, 'len:', storedHash ? String(storedHash).length : 0);
 
+    if (!storedHash) {
+      console.log('LOGIN DEBUG -> no pinHash stored for guard:', id);
+      return res.status(500).json({ ok:false, error: 'no pin configured for guard' });
+    }
+
+    // Comparar (bcrypt) — pinStr es el plaintext
+    const match = await bcrypt.compare(pinStr, String(storedHash));
+    console.log('LOGIN DEBUG - bcrypt.compare result:', match);
+
+    if (!match) {
+      return res.status(401).json({ ok: false, error: "invalid pin" });
+    }
+
+    // Si correcto -> firmar JWT
     const payload = { guardId: id, name: guard.name, role: "guard" };
-    const secret: Secret = (process.env.JWT_SECRET as Secret) || "dev_fallback_secret";
-    const opts: SignOptions = { expiresIn: process.env.JWT_EXP as unknown as SignOptions['expiresIn'] };
+    const rawExp = process.env.JWT_EXP || "6h";
+    const maybeNum = Number(rawExp);
+    const jwtExpVal = Number.isFinite(maybeNum) ? maybeNum : String(rawExp);
+ 
+    const opts: SignOptions = {
+  // TypeScript a veces no reconoce las uniones personalizadas; casteamos solo aquí (seguro en runtime)
+    expiresIn: jwtExpVal as unknown as SignOptions["expiresIn"]
+};
+    const secret: Secret = (process.env.JWT_SECRET || "dev_fallback_secret") as Secret;
+    const token = jwt.sign(payload as any, secret, opts);
 
-
-    const token = jwt.sign(payload as string | object | Buffer, secret, opts);
 
     return res.json({ ok: true, token, guardId: id, name: guard.name });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ ok: false, error: 'server' });
+    console.error('guard/login error:', err);
+    return res.status(500).json({ ok: false, error: "server error" });
   }
 });
 
 
 
-// guard/shift/start (requireGuard)
+
+// POST /guard/shift/start  (requireGuard)
 app.post("/guard/shift/start", requireGuard, async (req, res) => {
   try {
     const guardId = (req as any).guard.id;
-    const { notes, createdByAdminId } = req.body || {};
+    const { notes, createdByAdminId, force } = req.body || {};
+
+    // comprobar si ya hay un shift activo para este guard (evitar duplicados)
+    const snap = await db.ref("guardShifts").orderByChild("guardId").equalTo(guardId).once("value");
+    const val = snap.val() || {};
+    const open = Object.keys(val)
+      .map(k => ({ id: k, ...(val[k] || {}) }))
+      .filter(s => !s.endTimestamp && s.active !== false); // mayor tolerancia
+
+    if (open.length && !force) {
+      // devolver el shift activo (evita abrir duplicados)
+      return res.status(400).json({ ok:false, error:"already active", shift: open[0] });
+    }
+
     const ref = db.ref("guardShifts").push();
     const shiftId = ref.key!;
     const now = Date.now();
-    await ref.set({ guardId, startTimestamp: now, createdByAdminId: createdByAdminId || null, notes: notes || null });
-    return res.json({ ok: true, shiftId, startTimestamp: now });
+    await ref.set({
+      guardId,
+      startTimestamp: now,
+      active: true,
+      createdByAdminId: createdByAdminId || null,
+      notes: notes || null
+    });
+    return res.json({ ok:true, shiftId, startTimestamp: now });
   } catch (err) {
-    console.error("guard/shift/start", err);
-    return res.status(500).json({ ok: false, error: "server" });
+    console.error("guard/shift/start error:", err);
+    return res.status(500).json({ ok:false, error:"server error" });
   }
 });
 
-// guard/shift/end (requireGuard)
+
+// POST /guard/shift/end  (requireGuard) - mejorado
 app.post("/guard/shift/end", requireGuard, async (req, res) => {
   try {
     const guardId = (req as any).guard.id;
     const { shiftId, notes } = req.body || {};
-    if (!shiftId) return res.status(400).json({ ok: false, error: "shiftId required" });
 
-    const shiftSnap = await db.ref(`guardShifts/${shiftId}`).once("value");
-    if (!shiftSnap.exists()) return res.status(404).json({ ok: false, error: "shift not found" });
+    if (shiftId) {
+      const sSnap = await db.ref(`guardShifts/${shiftId}`).once("value");
+      if (!sSnap.exists()) return res.status(404).json({ ok:false, error:"shift not found" });
+      const shift = sSnap.val();
+      if (String(shift.guardId) !== String(guardId)) return res.status(403).json({ ok:false, error:"not owner of shift" });
+      if (shift.endTimestamp) return res.status(400).json({ ok:false, error:"shift already ended" });
 
-    const shift = shiftSnap.val();
-    if (shift.guardId !== guardId) return res.status(403).json({ ok: false, error: "not owner of shift" });
+      const endTs = Date.now();
+      await db.ref(`guardShifts/${shiftId}`).update({ endTimestamp: endTs, active: false, notes: notes || shift.notes || null });
+      return res.json({ ok:true, shiftId, endTimestamp: endTs });
+    }
 
+    // buscar shift activo más reciente para este guard
+    const snap = await db.ref("guardShifts").orderByChild("guardId").equalTo(guardId).once("value");
+    const val = snap.val() || {};
+    const openShifts = Object.keys(val)
+      .map(k => ({ id: k, ...(val[k] || {}) }))
+      .filter(s => !s.endTimestamp && s.active !== false)
+      .sort((a:any,b:any)=> (b.startTimestamp||0) - (a.startTimestamp||0));
+
+    if (!openShifts.length) return res.status(404).json({ ok:false, error:"no active shift found for guard" });
+
+    const target = openShifts[0];
     const endTs = Date.now();
-    await db.ref(`guardShifts/${shiftId}`).update({ endTimestamp: endTs, notes: notes || shift.notes || null });
-    return res.json({ ok: true, shiftId, endTimestamp: endTs });
+    await db.ref(`guardShifts/${target.id}`).update({ endTimestamp: endTs, active: false, notes: notes || target.notes || null });
+
+    return res.json({ ok:true, shiftId: target.id, endTimestamp: endTs, message:"closed latest active shift" });
   } catch (err) {
-    console.error("guard/shift/end", err);
-    return res.status(500).json({ ok: false, error: "server" });
+    console.error("guard/shift/end (improved) error:", err);
+    return res.status(500).json({ ok:false, error:"server error" });
   }
 });
 
@@ -607,15 +686,20 @@ app.post("/guard/authorize", requireGuard, async (req, res) => {
    Admin read endpoints for shifts/authorizations/teachers/admins
    -------------------- */
 
-// GET /guardShifts (public read)
+// GET /guardShifts?active=true&guardId=xxx  (admin or public read)
 app.get("/guardShifts", async (req, res) => {
   try {
-    const guardId = String(req.query.guardId || "").trim();
+    const guardIdQ = String(req.query.guardId || "").trim();
+    const activeQ = String(req.query.active || "").toLowerCase(); // "true"|"false"|""
     const snap = await db.ref("guardShifts").once("value");
     const val = snap.val() || {};
-    const arr = Object.keys(val).map(k => ({ id: k, ...val[k] }));
-    const filtered = guardId ? arr.filter(s => s.guardId === guardId) : arr;
-    return res.json({ ok:true, count: filtered.length, data: filtered });
+    let arr = Object.keys(val).map(k => ({ id: k, ...(val[k] || {}) }));
+    if (guardIdQ) arr = arr.filter(s => String(s.guardId) === guardIdQ);
+    if (activeQ === "true") arr = arr.filter(s => !s.endTimestamp && s.active !== false);
+    if (activeQ === "false") arr = arr.filter(s => s.endTimestamp || s.active === false);
+    // ordenar desc por startTimestamp
+    arr.sort((a:any,b:any)=> (b.startTimestamp||0) - (a.startTimestamp||0));
+    return res.json({ ok:true, count: arr.length, data: arr });
   } catch (err) {
     console.error("GET guardShifts", err);
     return res.status(500).json({ ok:false, error:"server error" });
@@ -636,6 +720,20 @@ app.get("/guardAuthorizations", async (req, res) => {
     return res.status(500).json({ ok:false, error:"server error" });
   }
 });
+
+// GET /guards  (requireAdmin)
+app.get('/guards', requireAdmin, async (req, res) => {
+  try {
+    const snap = await db.ref('guards').once('value');
+    const val = snap.val() || {};
+    const out = Object.keys(val).map(k => ({ id: k, name: val[k].name || null }));
+    return res.json({ ok:true, count: out.length, data: out });
+  } catch (err) {
+    console.error('/guards error:', err);
+    return res.status(500).json({ ok:false, error: 'server error' });
+  }
+});
+
 
 /* --------------------
    Teachers endpoints
@@ -762,6 +860,77 @@ app.post("/admins", requireAdmin, async (req, res) => {
     return res.status(500).json({ ok:false, error:"server error" });
   }
 });
+
+// POST /admin/guard/shift/start  (requireAdmin)
+app.post('/admin/guard/shift/start', requireAdmin, async (req, res) => {
+  try {
+    const { guardId, notes, force } = req.body || {};
+    if (!guardId) return res.status(400).json({ ok:false, error: 'guardId required' });
+
+    // comprobar si ya hay un shift activo para este guard
+    const snap = await db.ref("guardShifts").orderByChild("guardId").equalTo(guardId).once("value");
+    const val = snap.val() || {};
+    const open = Object.keys(val)
+      .map(k => ({ id: k, ...(val[k] || {}) }))
+      .filter(s => !s.endTimestamp && s.active !== false);
+
+    if (open.length && !force) {
+      return res.status(400).json({ ok:false, error: 'already active', shift: open[0] });
+    }
+
+    const ref = db.ref("guardShifts").push();
+    const shiftId = ref.key!;
+    const now = Date.now();
+    await ref.set({
+      guardId,
+      startTimestamp: now,
+      active: true,
+      createdByAdminId: 'admin-ui',
+      notes: notes || null
+    });
+    return res.json({ ok:true, shiftId, startTimestamp: now });
+  } catch (err) {
+    console.error('/admin/guard/shift/start error:', err);
+    return res.status(500).json({ ok:false, error: 'server error' });
+  }
+});
+
+app.post('/admin/guard/shift/end', requireAdmin, async (req, res) => {
+  try {
+    const { guardId, shiftId, notes } = req.body || {};
+
+    if (shiftId) {
+      const sSnap = await db.ref(`guardShifts/${shiftId}`).once("value");
+      if (!sSnap.exists()) return res.status(404).json({ ok:false, error: 'shift not found' });
+      const shift = sSnap.val();
+      if (shift.endTimestamp) return res.status(400).json({ ok:false, error: 'shift already ended' });
+      const endTs = Date.now();
+      await db.ref(`guardShifts/${shiftId}`).update({ endTimestamp: endTs, active: false, notes: notes || shift.notes || null });
+      return res.json({ ok:true, shiftId, endTimestamp: endTs });
+    }
+
+    if (!guardId) return res.status(400).json({ ok:false, error: 'guardId or shiftId required' });
+
+    const snap = await db.ref("guardShifts").orderByChild("guardId").equalTo(guardId).once("value");
+    const val = snap.val() || {};
+    const openShifts = Object.keys(val)
+      .map(k => ({ id: k, ...(val[k] || {}) }))
+      .filter(s => !s.endTimestamp && s.active !== false)
+      .sort((a:any,b:any)=> (b.startTimestamp||0) - (a.startTimestamp||0));
+
+    if (!openShifts.length) return res.status(404).json({ ok:false, error: 'no active shift found for guard' });
+
+    const target = openShifts[0];
+    const endTs = Date.now();
+    await db.ref(`guardShifts/${target.id}`).update({ endTimestamp: endTs, active: false, notes: notes || target.notes || null });
+
+    return res.json({ ok:true, shiftId: target.id, endTimestamp: endTs, message: 'closed latest active shift' });
+  } catch (err) {
+    console.error('/admin/guard/shift/end error:', err);
+    return res.status(500).json({ ok:false, error: 'server error' });
+  }
+});
+
 
 // PUT /admins/:id
 app.put("/admins/:id", requireAdmin, async (req, res) => {
