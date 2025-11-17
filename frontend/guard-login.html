@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Guard Login — Control de Seguridad</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { background:#0f1724; color:#e6eef8; display:flex; align-items:center; justify-content:center; height:100vh; margin:0; }
+    .card { border-radius:12px; width:100%; max-width:520px; padding:1.25rem; box-shadow:0 8px 30px rgba(0,0,0,0.6); }
+    h4 { margin-bottom:.5rem; }
+    .muted { color:#9fb0c8; font-size:.95rem; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h4>Ingreso Guardia</h4>
+    <p class="muted">Ingresa tu ID y PIN para comenzar tu turno.</p>
+
+    <div id="msg"></div>
+
+    <form id="loginForm" class="row g-2">
+      <div class="col-12">
+        <label class="form-label small-muted">ID</label>
+        <input id="inputGuardId" class="form-control" placeholder="ej: guard-01" required />
+      </div>
+      <div class="col-12">
+        <label class="form-label small-muted">PIN</label>
+        <input id="inputPin" type="password" class="form-control" placeholder="Ingrese su PIN" required />
+      </div>
+
+      <div class="col-6">
+        <button id="btnLogin" class="btn btn-primary w-100" type="submit">Ingresar</button>
+      </div>
+      <div class="col-6">
+        <button id="btnCancel" class="btn btn-outline-light w-100" type="button">Cancelar</button>
+      </div>
+
+      <div class="col-12 mt-2">
+        <div class="small-muted">¿Problemas? Contacta al administrador.</div>
+      </div>
+    </form>
+  </div>
+
+<script>
+/* CONFIG: ajusta si tu backend está en otra URL */
+const BACKEND_URL = "http://localhost:3000";
+
+/* Keys para localStorage */
+const LOGIN_KEY = "guard_auth_token";
+const LOGIN_GUARD_ID = "guard_auth_guardid";
+
+/* UI helpers */
+function showMsg(text, level = 'info', autoClear = true) {
+  const el = document.getElementById('msg');
+  el.innerHTML = `<div class="alert alert-${level} p-2">${text}</div>`;
+  if (autoClear) setTimeout(()=> el.innerHTML = '', 3500);
+}
+
+/* Submit del formulario */
+document.getElementById('loginForm').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const id = document.getElementById('inputGuardId').value.trim();
+  const pin = document.getElementById('inputPin').value.trim();
+  if (!id || !pin) { showMsg('ID y PIN requeridos', 'warning'); return; }
+
+  showMsg('Iniciando sesión...', 'info', false);
+  try {
+    const r = await fetch(`${BACKEND_URL}/guard/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, pin })
+    });
+    const js = await r.json().catch(()=>({ ok:false, error:'invalid json' }));
+
+    if (!r.ok || !js.ok) {
+      showMsg(`Login falló: ${js.error || js.message || 'server'}`, 'danger');
+      return;
+    }
+
+    // Guardar token y guardId (persistencia local)
+    localStorage.setItem(LOGIN_KEY, js.token);
+    localStorage.setItem(LOGIN_GUARD_ID, js.guardId || id);
+
+    showMsg('✔ Login correcto — redirigiendo...', 'success');
+
+    // Redirige al lugar donde se inicia turno:
+    // Opción A (recomendada según flujo anterior): guard.html
+    window.location.href = 'guard.html';
+
+    // Opción B (si prefieres que el guard vea su propio panel guard.html):
+    // window.location.href = 'guard.html';
+  } catch (e) {
+    showMsg('Error de red: ' + (e.message || e), 'danger');
+  }
+});
+
+/* Botón cancelar: limpia y devuelve a index (opcional) */
+document.getElementById('btnCancel').addEventListener('click', () => {
+  document.getElementById('inputGuardId').value = '';
+  document.getElementById('inputPin').value = '';
+  // redirigir si quieres:
+  // window.location.href = 'index.html';
+});
+</script>
+</body>
+</html>

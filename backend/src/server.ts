@@ -83,13 +83,6 @@ app.use(cors());
 /* --------------------
    Middlewares
    -------------------- */
-function requireAdmin(req: Request, res: Response, next: NextFunction) {
-  const header = (req.headers["x-admin-secret"] || "") as string;
-  if (!header || String(header).trim() !== String(ADMIN_SECRET).trim()) {
-    return res.status(401).json({ ok: false, error: "unauthorized" });
-  }
-  return next();
-}
 
 function requireGuard(req: Request, res: Response, next: NextFunction) {
   const auth = (req.headers["authorization"] || "") as string;
@@ -108,6 +101,32 @@ function requireGuard(req: Request, res: Response, next: NextFunction) {
 /* --------------------
    Helpers (usar después de init db)
    -------------------- */
+
+async function requireFirebaseAdmin(req: Request, res: Response, next: NextFunction) {
+  try {
+    const authHeader = (req.headers['authorization'] || '') as string;
+    const m = authHeader.match(/^Bearer\s+(.+)$/i);
+    if (!m) return res.status(401).json({ ok:false, error: 'no token' });
+    const idToken = m[1];
+    // verifica token con Firebase Admin SDK
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    const uid = decoded.uid;
+    // verifica que el uid sea admin en la RTDB
+    const snap = await db.ref(`admins/${uid}`).once('value');
+    if (!snap.exists()) return res.status(403).json({ ok:false, error: 'not admin' });
+    const profile = snap.val();
+    if (profile.role !== 'admin') return res.status(403).json({ ok:false, error:'not admin role' });
+
+    // adjunta info útil
+    (req as any).admin = { uid, name: profile.name || null, email: profile.email || null };
+    return next();
+  } catch (err) {
+    console.error('requireFirebaseAdmin error:', err);
+    return res.status(401).json({ ok:false, error: 'invalid token' });
+  }
+}
+
+
 async function ensureTokenForId(id: string) {
   const tRef = db.ref(`accessTokens/${id}`);
   const tSnap = await tRef.once("value");
@@ -449,7 +468,7 @@ app.get("/users", async (req, res) => {
 });
 
 // POST /users
-app.post("/users", requireAdmin, async (req, res) => {
+app.post("/users",requireFirebaseAdmin, async (req, res) => {
   try {
     let { id, name, role, token, regenerate } = req.body || {};
 
@@ -494,7 +513,7 @@ app.post("/users", requireAdmin, async (req, res) => {
 });
 
 // PUT /users/:id
-app.put("/users/:id", requireAdmin, async (req, res) => {
+app.put("/users/:id",requireFirebaseAdmin, async (req, res) => {
   try {
     const id = String(req.params.id || "").trim();
     if (!id) return res.status(400).json({ ok:false, error:"missing id" });
@@ -540,7 +559,7 @@ app.put("/users/:id", requireAdmin, async (req, res) => {
 });
 
 // DELETE /users/:id
-app.delete("/users/:id", requireAdmin, async (req, res) => {
+app.delete("/users/:id",requireFirebaseAdmin, async (req, res) => {
   try {
     const id = String(req.params.id || "").trim();
     if (!id) return res.status(400).json({ ok:false, error:"missing id" });
@@ -700,6 +719,7 @@ app.post("/guard/shift/end", requireGuard, async (req, res) => {
 });
 
 // guard/authorize (requireGuard)
+// guard/authorize (requireGuard)  -- REEMPLAZAR EXISTENTE con esta versión
 app.post("/guard/authorize", requireGuard, async (req, res) => {
   try {
     const guardId = (req as any).guard.id;
@@ -707,12 +727,124 @@ app.post("/guard/authorize", requireGuard, async (req, res) => {
     if (!studentId && !token) return res.status(400).json({ ok: false, error: "studentId or token required" });
 
     const now = Date.now();
+
+    // ------------------------
+    // 1) Verificar que el guardia esté en turno
+    // ------------------------
+    // Si se entrega shiftId, verificar que exista y pertenezca al guard y esté activo.
+    // Si no se entrega, buscar cualquier shift activo del guard.
+    let shiftValid = false;
+    let foundShift: any = null;
+    try {
+      if (shiftId) {
+        const sSnap = await db.ref(`guardShifts/${shiftId}`).once("value");
+        if (sSnap.exists()) {
+          const sVal = sSnap.val();
+          if (String(sVal.guardId) === String(guardId) && !sVal.endTimestamp && sVal.active !== false) {
+            shiftValid = true;
+            foundShift = { id: shiftId, ...sVal };
+          }
+        }
+      } else {
+        const sSnap = await db.ref("guardShifts").orderByChild("guardId").equalTo(guardId).once("value");
+        const val = sSnap.val() || {};
+        const open = Object.keys(val)
+          .map(k => ({ id: k, ...(val[k] || {}) }))
+          .filter((s: any) => !s.endTimestamp && s.active !== false)
+          .sort((a:any,b:any)=> (b.startTimestamp||0) - (a.startTimestamp||0));
+        if (open.length) {
+          shiftValid = true;
+          foundShift = open[0];
+        }
+      }
+    } catch (e) {
+      console.warn("shift check failed:", e);
+      shiftValid = false;
+    }
+
+    if (!shiftValid) {
+      // registrar intento
+      await logAccess({
+        id: studentId || null,
+        token: token || null,
+        authorized: false,
+        reason: "guard not on shift",
+        sessionId
+      });
+      return res.status(403).json({ ok: false, error: "Guardia no está en turno" });
+    }
+
+    // ------------------------
+    // 2) Verificar existencia del usuario (studentId o token)
+    // ------------------------
+    let resolvedStudentId: string | null = null;
+    let studentName: string | null = null;
+
+    // Si llega studentId -> comprobar existencia en /students
+    if (studentId) {
+      const sSnap = await db.ref(`students/${studentId}`).once("value");
+      if (!sSnap.exists()) {
+        await logAccess({
+          id: studentId,
+          token: token || null,
+          authorized: false,
+          reason: "student id not found",
+          sessionId
+        });
+        return res.status(400).json({ error: "Este usuario no existe" });
+      }
+      resolvedStudentId = studentId;
+      studentName = sSnap.val().name || null;
+    }
+
+    // Si llega token (y aún no resolvimos studentId) -> buscar token en accessTokens o tokens
+    if (!resolvedStudentId && token) {
+      let foundKey: string | null = null;
+      let tokenData: any = null;
+
+      const tSnap = await db.ref('accessTokens').orderByChild('token').equalTo(String(token)).once('value');
+      if (tSnap.exists()) {
+        const val = tSnap.val();
+        const keys = Object.keys(val);
+        foundKey = keys[0];
+        tokenData = val[foundKey];
+      } else {
+        const altSnap = await db.ref('tokens').orderByChild('token').equalTo(String(token)).once('value');
+        if (altSnap.exists()) {
+          const v = altSnap.val();
+          const keys2 = Object.keys(v);
+          foundKey = keys2[0];
+          tokenData = v[foundKey];
+        }
+      }
+
+      if (!foundKey) {
+        await logAccess({
+          token,
+          authorized: false,
+          reason: "token not linked to any user",
+          sessionId
+        });
+        return res.status(400).json({ error: "Este usuario no existe" });
+      }
+
+      // mark resolved
+      resolvedStudentId = foundKey;
+      try {
+        const sSnap = await db.ref(`students/${foundKey}`).once("value");
+        if (sSnap.exists()) studentName = sSnap.val().name || null;
+      } catch (e) { /* ignore */ }
+    }
+
+    // --------------
+    // 3) Si llegamos aquí: guard en turno y usuario existe -> proceder con autorización
+    // --------------
     const authRef = db.ref("guardAuthorizations").push();
     const authId = authRef.key!;
     await authRef.set({
       guardId,
-      shiftId: shiftId || null,
-      studentId: studentId || null,
+      shiftId: foundShift ? foundShift.id : (shiftId || null),
+      studentId: resolvedStudentId || null,
       token: token || null,
       authorized: true,
       reason: "manual_override",
@@ -721,33 +853,35 @@ app.post("/guard/authorize", requireGuard, async (req, res) => {
       sessionId
     });
 
-    if (studentId) {
-      await db.ref(`attendance/${sessionId}/${studentId}`).push({
+    if (resolvedStudentId) {
+      await db.ref(`attendance/${sessionId}/${resolvedStudentId}`).push({
         type: "manual_entry_by_guard",
         timestamp: now,
         guardId,
         authId,
-        shiftId: shiftId || null
+        shiftId: foundShift ? foundShift.id : (shiftId || null)
       });
     }
 
     await db.ref("accessHistory").push({
-      id: studentId || null,
+      id: resolvedStudentId || null,
       token: token || null,
       authorized: true,
       reason: "manual_override",
       note: note || null,
       timestamp: now,
       guardOverrideId: authId,
-      shiftId: shiftId || null
+      shiftId: foundShift ? foundShift.id : (shiftId || null)
     });
 
     return res.json({ ok: true, authId, timestamp: now });
   } catch (err) {
     console.error("guard/authorize", err);
+    await logAccess({ token: req.body?.token || null, id: req.body?.studentId || null, authorized: false, reason: "server error" });
     return res.status(500).json({ ok: false, error: "server" });
   }
 });
+
 
 /* --------------------
    Admin read endpoints for shifts/authorizations/teachers/admins
@@ -789,7 +923,7 @@ app.get("/guardAuthorizations", async (req, res) => {
 });
 
 // GET /guards  (requireAdmin)
-app.get('/guards', requireAdmin, async (req, res) => {
+app.get('/guards',requireFirebaseAdmin, async (req, res) => {
   try {
     const snap = await db.ref('guards').once('value');
     const val = snap.val() || {};
@@ -807,7 +941,7 @@ app.get('/guards', requireAdmin, async (req, res) => {
    -------------------- */
 
 // GET /teachers
-app.get("/teachers", requireAdmin, async (req, res) => {
+app.get("/teachers",requireFirebaseAdmin, async (req, res) => {
   try {
     const snap = await db.ref("teachers").once("value");
     const val = snap.val() || {};
@@ -828,7 +962,7 @@ app.get("/teachers", requireAdmin, async (req, res) => {
 });
 
 // POST /teachers
-app.post("/teachers", requireAdmin, async (req, res) => {
+app.post("/teachers",requireFirebaseAdmin, async (req, res) => {
   try {
     let { id, name } = req.body || {};
     if (!name || String(name).trim()==="") return res.status(400).json({ ok:false, error:"name required" });
@@ -852,7 +986,7 @@ app.post("/teachers", requireAdmin, async (req, res) => {
 });
 
 // PUT /teachers/:id
-app.put("/teachers/:id", requireAdmin, async (req, res) => {
+app.put("/teachers/:id",requireFirebaseAdmin, async (req, res) => {
   try {
     const id = String(req.params.id || "");
     const { name } = req.body || {};
@@ -870,7 +1004,7 @@ app.put("/teachers/:id", requireAdmin, async (req, res) => {
 });
 
 // DELETE /teachers/:id
-app.delete("/teachers/:id", requireAdmin, async (req, res) => {
+app.delete("/teachers/:id",requireFirebaseAdmin , async (req, res) => {
   try {
     const id = String(req.params.id || "");
     if (!id) return res.status(400).json({ ok:false, error:"missing id" });
@@ -888,26 +1022,55 @@ app.delete("/teachers/:id", requireAdmin, async (req, res) => {
    -------------------- */
 
 // GET /admins
-app.get("/admins", requireAdmin, async (req, res) => {
+// GET /admins  (requireAdmin)  — reemplaza tu handler actual por este
+app.get('/admins',requireFirebaseAdmin, async (req, res) => {
   try {
-    const snap = await db.ref("admins").once("value");
+    // DEBUG: mostrar el header que vino en la petición
+    console.log('DEBUG /admins -> x-admin-secret header:', req.headers['x-admin-secret'] ? '[present]' : '[missing]');
+
+    const snap = await db.ref('admins').once('value');
     const val = snap.val() || {};
-    const ids = Object.keys(val);
-    const out = await Promise.all(ids.map(async id => {
-      const tSnap = await db.ref(`accessTokens/${id}`).once("value");
-      const token = tSnap.exists() ? String(tSnap.val().token || null) : null;
-      const qrDataUrl = token ? await genQrDataUrl(id, token) : null;
-      return { id, name: val[id].name || null, createdAt: val[id].createdAt || null, token, qrDataUrl };
-    }));
-    return res.json({ ok:true, count: out.length, data: out });
+
+    // DEBUG: keys encontradas en la DB
+    const keys = Object.keys(val || {});
+    console.log('DEBUG /admins -> firebase keys count:', keys.length, 'keys:', keys.slice(0,20));
+
+    // convertir a array uniforme [{ id, name, ... }]
+    const out = keys.map(k => {
+      const v = val[k] || {};
+      return {
+        id: String(v.id || k),
+        name: v.name || v.fullName || v.nombre || null,
+        raw: v
+      };
+    });
+
+    // Forzar no-cache en la respuesta (evita 304 en front)
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+
+    return res.json({ ok: true, count: out.length, data: out });
   } catch (err) {
-    console.error("GET /admins", err);
-    return res.status(500).json({ ok:false, error:"server error" });
+    console.error('/admins error:', err);
+    return res.status(500).json({ ok: false, error: 'server error' });
   }
 });
 
+
+// DEBUG endpoint sin auth: mostrar crudo admins (solo local/dev)
+app.get('/debug/admins', async (req, res) => {
+  try {
+    const snap = await db.ref('admins').once('value');
+    const val = snap.val() || {};
+    return res.json({ ok: true, raw: val, keys: Object.keys(val || {}) });
+  } catch (e) {
+    console.error('debug/admins error', e);
+    return res.status(500).json({ ok: false, error: 'server error' });
+  }
+});
+
+
 // POST /admins
-app.post("/admins", requireAdmin, async (req, res) => {
+app.post("/admins",requireFirebaseAdmin, async (req, res) => {
   try {
     let { id, name } = req.body || {};
     if (!name || String(name).trim()==="") return res.status(400).json({ ok:false, error:"name required" });
@@ -929,7 +1092,7 @@ app.post("/admins", requireAdmin, async (req, res) => {
 });
 
 // POST /admin/guard/shift/start  (requireAdmin)
-app.post('/admin/guard/shift/start', requireAdmin, async (req, res) => {
+app.post('/admin/guard/shift/start',requireFirebaseAdmin, async (req, res) => {
   try {
     const { guardId, notes, force } = req.body || {};
     if (!guardId) return res.status(400).json({ ok:false, error: 'guardId required' });
@@ -962,7 +1125,7 @@ app.post('/admin/guard/shift/start', requireAdmin, async (req, res) => {
   }
 });
 
-app.post('/admin/guard/shift/end', requireAdmin, async (req, res) => {
+app.post('/admin/guard/shift/end',requireFirebaseAdmin, async (req, res) => {
   try {
     const { guardId, shiftId, notes } = req.body || {};
 
@@ -998,9 +1161,82 @@ app.post('/admin/guard/shift/end', requireAdmin, async (req, res) => {
   }
 });
 
+app.post("/admin/guards/:id/reset-pin",requireFirebaseAdmin, async (req, res) => {
+  try {
+    const id = String(req.params.id || "").trim();
+    if (!id) return res.status(400).json({ ok:false, error:"missing id" });
+
+    // Verificar que el guard exista
+    const gSnap = await db.ref(`guards/${id}`).once("value");
+    if (!gSnap.exists()) return res.status(404).json({ ok:false, error:"guard not found" });
+
+    // Generar PIN temporal: 6 dígitos (ejemplo), puedes ajustar formato
+    const tempPin = Math.floor(100000 + Math.random() * 900000).toString();
+
+    // Hashear
+    const saltRounds = 10;
+    const hash = await bcrypt.hash(tempPin, saltRounds);
+
+    // Fechas
+    const now = Date.now();
+    const expiresMs = 10 * 60 * 1000; // 10 minutos
+    const expiresAt = now + expiresMs;
+
+    // Guardar hash y metadata (no guardar el plaintext)
+    await db.ref(`guards/${id}`).update({
+      pinHash: hash,
+      pinCreatedAt: now,
+      pinExpiresAt: expiresAt
+    });
+
+    // Log de auditoría admin
+    const adminActor = (req.headers["x-admin-id"] || "admin-ui"); // opcional si quieres registrar admin id
+    await db.ref("adminActions").push({
+      action: "resetPin",
+      actor: adminActor,
+      guardId: id,
+      timestamp: now,
+      note: req.body?.note || null,
+      ip: req.ip || null
+    });
+
+    // Devolver el PIN temporal SOLO en la respuesta (mostrar una vez en UI)
+    return res.json({
+      ok: true,
+      message: "PIN temporal generado (mostrar sólo una vez).",
+      tempPin,
+      expiresAt
+    });
+  } catch (err) {
+    console.error("POST /admin/guards/:id/reset-pin error:", err);
+    return res.status(500).json({ ok:false, error:"server error" });
+  }
+});
+
+// GET /admin/guards  (mejorado) - requiere requireAdmin
+app.get("/admin/guards",requireFirebaseAdmin, async (req, res) => {
+  try {
+    const snap = await db.ref('guards').once('value');
+    const val = snap.val() || {};
+    const ids = Object.keys(val);
+    const out = await Promise.all(ids.map(async id => {
+      const g = val[id] || {};
+      // opcional: leer últimos datos relevantes
+      const lastLogin = g.lastLogin || null;
+      const createdAt = g.createdAt || null;
+      // no entregar pinHash
+      return { id, name: g.name || null, lastLogin, createdAt };
+    }));
+    return res.json({ ok: true, count: out.length, data: out });
+  } catch (err) {
+    console.error("/admin/guards error:", err);
+    return res.status(500).json({ ok:false, error:"server error" });
+  }
+});
+
 
 // PUT /admins/:id
-app.put("/admins/:id", requireAdmin, async (req, res) => {
+app.put("/admins/:id",requireFirebaseAdmin, async (req, res) => {
   try {
     const id = String(req.params.id || "");
     const { name } = req.body || {};
@@ -1018,7 +1254,7 @@ app.put("/admins/:id", requireAdmin, async (req, res) => {
 });
 
 // DELETE /admins/:id
-app.delete("/admins/:id", requireAdmin, async (req, res) => {
+app.delete("/admins/:id",requireFirebaseAdmin, async (req, res) => {
   try {
     const id = String(req.params.id || "");
     if (!id) return res.status(400).json({ ok:false, error:"missing id" });
@@ -1034,7 +1270,7 @@ app.delete("/admins/:id", requireAdmin, async (req, res) => {
 /* --------------------
    Shift history by shiftId (admin)
    -------------------- */
-app.get("/shift/:shiftId/history", requireAdmin, async (req, res) => {
+app.get("/shift/:shiftId/history",requireFirebaseAdmin, async (req, res) => {
   try {
     const shiftId = String(req.params.shiftId || "");
     if (!shiftId) return res.status(400).json({ ok: false, error: "missing shiftId" });

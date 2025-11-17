@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Admin — Control de Seguridad (Usuarios & Shifts & Historial)</title>
+  <title>Admin — Control de Seguridad (Usuarios & Shifts & Historial & Guardias)</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
     body { background:#0f1724; color:#e6eef8; padding:1rem; }
@@ -14,6 +14,9 @@
     .mono { font-family: monospace; }
     .small-muted { color:#9fb0c8; font-size:.9rem; }
     .list-group-item { background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.03); }
+    #pinModal { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:9999; }
+    #pinModal .modal-box { background:#fff; color:#000; padding:1rem; border-radius:8px; width: 360px; max-width:95%; }
+    #guardsPane { max-height:520px; overflow:auto; }
   </style>
 </head>
 <body>
@@ -25,6 +28,7 @@
       <div>
         <button id="btnNavUsers" class="btn btn-sm btn-outline-light nav-btn">Usuarios</button>
         <button id="btnNavShifts" class="btn btn-sm btn-outline-light nav-btn">Turnos</button>
+        <button id="btnNavGuards" class="btn btn-sm btn-outline-light nav-btn">Guardias</button>
         <button id="btnNavHistory" class="btn btn-sm btn-outline-light nav-btn">Historial</button>
         <a href="index.html" class="btn btn-sm btn-outline-light">Ir al Totem</a>
       </div>
@@ -116,53 +120,114 @@
       </div>
     </section>
 
+    <!-- SECTION: GUARDS (new) -->
+    <section id="sectionGuards" class="card p-3 mb-3 hidden">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <h5 class="m-0">Guardias</h5>
+        <div class="small-muted">Lista de guardias y acciones administrativas</div>
+      </div>
+
+      <div class="d-flex gap-3">
+        <div style="width:320px;">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <strong>Guardias</strong>
+            <button id="btnGuardsRefresh" class="btn btn-sm btn-outline-light">Actualizar</button>
+          </div>
+          <div id="guardsPane" class="list-group">
+            <div class="muted p-2">Cargando guardias...</div>
+          </div>
+        </div>
+
+        <div style="flex:1;">
+          <div id="guardDetailsEmpty" class="muted">Selecciona un guard para ver detalles y acciones.</div>
+          <div id="guardDetailsContent" class="hidden">
+            <h6 id="gdName">—</h6>
+            <p class="small-muted">ID: <span id="gdId" class="mono">—</span></p>
+            <p id="gdMeta" class="small-muted">Creado: —</p>
+
+            <div class="mt-3">
+              <button id="btnResetPinLocal" class="btn btn-warning">Ver / Generar PIN (admin)</button>
+              <button id="btnViewShiftsForGuard" class="btn btn-outline-light">Ver turnos</button>
+            </div>
+
+            <div id="guardPinResult" class="mt-3"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="mt-3 small-muted">Nota: el PIN se muestra una sola vez — el backend genera un PIN temporal y lo devuelve en la respuesta.</div>
+    </section>
+
     <!-- SECTION: HISTORY (Admin - Access Logs) -->
     <section id="sectionHistory" class="card p-3 mb-3 hidden">
-  <div class="d-flex justify-content-between align-items-center mb-2">
-    <h5 class="m-0">Historial de accesos</h5>
-    <div class="small-muted">Registros de estudiantes y guardias</div>
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <h5 class="m-0">Historial de accesos</h5>
+        <div class="small-muted">Registros de estudiantes y guardias</div>
+      </div>
+
+      <div class="row g-2 mb-2 align-items-end">
+        <div class="col-md-3">
+          <input id="filterGuardHistory" class="form-control" placeholder="Filtrar por guard ID (ej: guard-01)">
+        </div>
+        <div class="col-md-3">
+          <input id="filterStartHistory" type="date" class="form-control">
+        </div>
+        <div class="col-md-3">
+          <input id="filterEndHistory" type="date" class="form-control">
+        </div>
+        <div class="col-md-3">
+          <button id="btnFilterHistory" class="btn btn-primary w-100">Aplicar filtros</button>
+        </div>
+      </div>
+
+      <div class="table-responsive">
+        <table class="table table-sm table-borderless text-white align-middle">
+          <thead class="muted">
+            <tr>
+              <th>Fecha/Hora</th>
+              <th>Estudiante</th>
+              <th>Guardia</th>
+              <th>Shift ID</th>
+              <th>Resultado</th>
+              <th>Motivo</th>
+            </tr>
+          </thead>
+          <tbody id="historyBody"><tr><td colspan="6" class="muted">Cargando...</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
   </div>
 
-  <div class="row g-2 mb-2 align-items-end">
-    <div class="col-md-3">
-      <input id="filterGuardHistory" class="form-control" placeholder="Filtrar por guard ID (ej: guard-01)">
+  <!-- PIN modal (mostrar PIN temporal solo una vez) -->
+  <div id="pinModal" aria-hidden="true">
+    <div class="modal-box">
+      <h5>PIN temporal (cópialo ahora)</h5>
+      <p id="pinValue" style="font-size:1.4rem; font-weight:700; margin:0.5rem 0;">—</p>
+      <p class="small-muted">Expira: <span id="pinExpires">—</span></p>
+      <div class="d-flex gap-2 mt-2">
+        <button id="btnCopyPin" class="btn btn-primary btn-sm">Copiar</button>
+        <button id="btnClosePin" class="btn btn-secondary btn-sm">Cerrar</button>
+      </div>
     </div>
-    <div class="col-md-3">
-      <input id="filterStartHistory" type="date" class="form-control">
-    </div>
-    <div class="col-md-3">
-      <input id="filterEndHistory" type="date" class="form-control">
-    </div>
-    <div class="col-md-3">
-      <button id="btnFilterHistory" class="btn btn-primary w-100">Aplicar filtros</button>
-    </div>
-  </div>
-
-  <div class="table-responsive">
-    <table class="table table-sm table-borderless text-white align-middle">
-      <thead class="muted">
-        <tr>
-          <th>Fecha/Hora</th>
-          <th>Estudiante</th>
-          <th>Guardia</th>
-          <th>Shift ID</th>
-          <th>Resultado</th>
-          <th>Motivo</th>
-        </tr>
-      </thead>
-      <tbody id="historyBody"><tr><td colspan="6" class="muted">Cargando...</td></tr></tbody>
-    </table>
-  </div>
-</section>
-
   </div>
 
 <script>
 /* ====== CONFIG: ajusta según tu entorno ====== */
 const BACKEND_URL = "http://localhost:3000";   // cambia si corresponde
-const ADMIN_SECRET = "mi_secreto_super_seguro"; // reemplaza por tu ADMIN_SECRET local (NO subir a repo)
+// admin secret se saca de localStorage si está; hay fallback
+const ADMIN_SECRET = localStorage.getItem('admin_secret') || "mi_secreto_super_seguro";
 /* ============================================ */
 
+window.addEventListener('load', () => {
+  const t = localStorage.getItem('idToken');
+  if (!t) {
+    // no está logueado
+    window.location.href = 'admin-login.html';
+  }
+});
+
+/* Helpers UI */
 function toast(msg, level='info', timeout=3500) {
   const a = document.getElementById('alertArea');
   const el = document.createElement('div');
@@ -174,6 +239,9 @@ function toast(msg, level='info', timeout=3500) {
 /* ---- Utils para llamadas al backend (admin) ---- */
 async function adminFetch(path, opts = {}) {
   opts.headers = opts.headers || {};
+  const idToken = localStorage.getItem('idToken') || '';
+  if (idToken) opts.headers['Authorization'] = 'Bearer ' + idToken;
+  // Añadimos siempre x-admin-secret para endpoints admin (backend lo espera)
   opts.headers['x-admin-secret'] = ADMIN_SECRET;
   opts.headers['Accept'] = 'application/json';
   if (opts.body && typeof opts.body !== 'string') {
@@ -230,10 +298,18 @@ async function renderUsersTable(roleFilter="") {
   document.querySelectorAll('.regen-btn').forEach(b => {
     b.onclick = async () => {
       const id = b.dataset.id;
-      if (!confirm(`Regenerar token para ${id}?`)) return;
+      if(!confirm(`Regenerar token para ${id}?`)) return;
       b.disabled = true;
-      const r = await adminFetch('/users', { method:'POST', body: { id, regenerate: true }});
-      if (!r.ok) toast('Error regenerando: ' + (r.body.error||'server'), 'danger'); else { toast('Token regenerado', 'success'); await renderUsersTable(document.getElementById('filterRole').value); }
+      const r = await adminFetch(`/users/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        body: { regenerate: true }
+      });
+      if (!r.ok) {
+        toast('Error regenerando: ' + (r.body?.error || 'server'), 'danger');
+      } else {
+        toast('Token regenerado', 'success');
+        await renderUsersTable(document.getElementById('filterRole').value);
+      }
       b.disabled = false;
     };
   });
@@ -263,6 +339,95 @@ document.getElementById('createForm').addEventListener('submit', async (ev) => {
 document.getElementById('filterRole').addEventListener('change', ()=> renderUsersTable(document.getElementById('filterRole').value));
 document.getElementById('refreshUsersBtn').addEventListener('click', ()=> renderUsersTable(document.getElementById('filterRole').value));
 
+/* ===================== GUARDS (new, integrated) ===================== */
+let guardsCache = [];
+let selectedGuard = null;
+
+async function loadGuardsForAdmin() {
+  const pane = document.getElementById('guardsPane');
+  pane.innerHTML = '<div class="muted p-2">Cargando guardias...</div>';
+  try {
+    const r = await adminFetch('/guards', { method: 'GET' });
+    if (!r.ok) { pane.innerHTML = `<div class="muted p-2">Error: ${r.body?.error || r.status}</div>`; return; }
+    const rows = r.body.data || [];
+    guardsCache = rows;
+    if (!rows.length) { pane.innerHTML = '<div class="muted p-2">No hay guardias registrados</div>'; return; }
+
+    pane.innerHTML = rows.map(g => `
+      <div class="list-group-item d-flex justify-content-between align-items-center" style="cursor:pointer" data-id="${g.id}">
+        <div>
+          <strong>${g.id}</strong><br><small class="small-muted">${g.name || ''}</small>
+        </div>
+        <div>
+          <button class="btn btn-sm btn-outline-light btn-select-guard" data-id="${g.id}">Seleccionar</button>
+        </div>
+      </div>
+    `).join('');
+
+    pane.querySelectorAll('.btn-select-guard').forEach(b => {
+      b.onclick = () => {
+        const id = b.dataset.id;
+        const g = guardsCache.find(x => x.id === id) || { id };
+        selectGuard(g);
+      };
+    });
+  } catch (e) {
+    console.error(e);
+    pane.innerHTML = '<div class="muted p-2">Error de red</div>';
+  }
+}
+
+function selectGuard(g) {
+  selectedGuard = g;
+  document.getElementById('guardDetailsEmpty').classList.add('hidden');
+  document.getElementById('guardDetailsContent').classList.remove('hidden');
+  document.getElementById('gdName').textContent = g.name || '(sin nombre)';
+  document.getElementById('gdId').textContent = g.id || '—';
+  document.getElementById('gdMeta').textContent = g.createdAt ? ('Creado: ' + new Date(g.createdAt).toLocaleString()) : 'Creado: —';
+  document.getElementById('guardPinResult').innerHTML = '';
+}
+
+/* cuando el admin presiona "Ver / Generar PIN" -> llama al endpoint reset-pin (protegido)
+   y muestra el tempPin en el modal. */
+document.getElementById('btnResetPinLocal')?.addEventListener('click', async () => {
+  if (!selectedGuard) { toast('Selecciona un guard primero','warning'); return; }
+  if (!confirm(`Generar PIN temporal para ${selectedGuard.id}? (se mostrará solo una vez)`)) return;
+  try {
+    const res = await fetch(`${BACKEND_URL}/admin/guards/${encodeURIComponent(selectedGuard.id)}/reset-pin`, {
+      method: 'POST',
+      headers: { 'Content-Type':'application/json', 'x-admin-secret': ADMIN_SECRET },
+      body: JSON.stringify({})
+    });
+    const js = await res.json();
+    if (!res.ok) { toast(js.error || 'Error', 'danger'); return; }
+
+    // mostrar modal con PIN temporal
+    document.getElementById('pinValue').textContent = js.tempPin || '—';
+    document.getElementById('pinExpires').textContent = js.expiresAt ? new Date(js.expiresAt).toLocaleString() : '—';
+    document.getElementById('pinModal').style.display = 'flex';
+
+    document.getElementById('guardPinResult').innerHTML = `<div class="alert alert-success p-2">PIN generado. Se mostró en modal — cópialo ahora.</div>`;
+
+    document.getElementById('btnCopyPin').onclick = () => {
+      navigator.clipboard.writeText(js.tempPin || "");
+      alert('PIN copiado');
+    };
+    document.getElementById('btnClosePin').onclick = () => {
+      document.getElementById('pinModal').style.display = 'none';
+    };
+  } catch (e) {
+    console.error(e);
+    toast('Error de red', 'danger');
+  }
+});
+
+document.getElementById('btnViewShiftsForGuard')?.addEventListener('click', () => {
+  if (!selectedGuard) { toast('Selecciona un guard primero','warning'); return; }
+  window.location.href = `/admin/guard-shifts.html?guardId=${encodeURIComponent(selectedGuard.id)}`;
+});
+
+document.getElementById('btnGuardsRefresh').addEventListener('click', loadGuardsForAdmin);
+
 /* ===================== SHIFTS ===================== */
 async function fetchGuardsList() {
   const r = await adminFetch('/guards', { method: 'GET' });
@@ -282,7 +447,6 @@ async function fetchShifts(activeOnly=false, startDate=null, endDate=null) {
   const r = await adminFetch(`/guardShifts${qs}`, { method:'GET' });
   if (!r.ok) return [];
   let data = r.body.data || [];
-  // date filtering optional (client-side)
   if (startDate) {
     const s = new Date(startDate).getTime();
     data = data.filter(d => (d.startTimestamp || 0) >= s);
@@ -291,6 +455,8 @@ async function fetchShifts(activeOnly=false, startDate=null, endDate=null) {
     const e = new Date(endDate).getTime() + 86400000;
     data = data.filter(d => (d.startTimestamp || 0) <= e);
   }
+  // ordenar por startTimestamp descendente
+  data.sort((a,b) => (b.startTimestamp||0) - (a.startTimestamp||0));
   return data;
 }
 
@@ -311,7 +477,6 @@ function renderShiftItemHtml(s) {
         <div><span class="${badge}">${status}</span></div>
         <div class="mt-2">
           ${status === 'En turno' ? `<button class="btn btn-sm btn-outline-light end-shift" data-id="${s.id}">Finalizar</button>` : ''}
-          <button class="btn btn-sm btn-outline-light view-shift" data-id="${s.id}">Ver</button>
         </div>
       </div>
     </div>
@@ -319,32 +484,34 @@ function renderShiftItemHtml(s) {
 }
 
 async function refreshShiftsView() {
+  console.log('[refreshShiftsView] starting');
   const startDate = document.getElementById('filterStartDate').value || null;
   const endDate = document.getElementById('filterEndDate').value || null;
 
-  const active = await fetchShifts(true, startDate, endDate);
-  document.getElementById('activeList').innerHTML = active.length ? active.map(renderShiftItemHtml).join('') : '<div class="muted p-2">No hay guardias en turno</div>';
-  const all = await fetchShifts(false, startDate, endDate);
-  document.getElementById('allList').innerHTML = all.length ? all.map(renderShiftItemHtml).join('') : '<div class="muted p-2">Sin registros</div>';
+  try {
+    const active = await fetchShifts(true, startDate, endDate);
+    document.getElementById('activeList').innerHTML = active.length ? active.map(renderShiftItemHtml).join('') : '<div class="muted p-2">No hay guardias en turno</div>';
+    const all = await fetchShifts(false, startDate, endDate);
+    document.getElementById('allList').innerHTML = all.length ? all.map(renderShiftItemHtml).join('') : '<div class="muted p-2">Sin registros</div>';
+    console.log('[refreshShiftsView] rendered counts active=', active.length, 'all=', all.length);
 
-  // attach finalizer handlers
-  document.querySelectorAll('.end-shift').forEach(b => {
-    b.onclick = async () => {
-      const id = b.dataset.id;
-      if (!confirm('Finalizar shift '+id+' ?')) return;
-      b.disabled = true;
-      const r = await adminFetch('/admin/guard/shift/end', { method:'POST', body: { shiftId: id }});
-      if (!r.ok) toast('Error finalizando: ' + (r.body.error||'server'), 'danger'); else { toast('Shift finalizado','success'); await refreshShiftsView(); }
-      b.disabled = false;
-    };
-  });
+    // attach handlers a los botones recién renderizados
+    document.querySelectorAll('.end-shift').forEach(b => {
+      b.onclick = async () => {
+        const id = b.dataset.id;
+        if (!confirm('Finalizar shift '+id+' ?')) return;
+        b.disabled = true;
+        const r = await adminFetch('/admin/guard/shift/end', { method:'POST', body: { shiftId: id }});
+        if (!r.ok) toast('Error finalizando: ' + (r.body.error||'server'), 'danger'); else { toast('Shift finalizado','success'); await refreshShiftsView(); }
+        b.disabled = false;
+      };
+    });
 
-  document.querySelectorAll('.view-shift').forEach(b => {
-    b.onclick = async () => {
-      const id = b.dataset.id;
-      window.open(`shift_history.html?shiftId=${encodeURIComponent(id)}`, '_blank');
-    };
-  });
+  } catch (e) {
+    console.error('[refreshShiftsView] error', e);
+    toast('Error actualizando lista de turnos', 'danger');
+    throw e;
+  }
 }
 
 /* Admin start/end shift for selected guard (buttons) */
@@ -362,7 +529,11 @@ document.getElementById('btnAdminEndShift').addEventListener('click', async () =
   if (!r.ok) toast('Error finalizando shift: ' + (r.body.error||'server'), 'danger'); else { toast('Shift finalizado','success'); await refreshShiftsView(); }
 });
 
-document.getElementById('refreshShiftsBtn').addEventListener('click', () => refreshShiftsView());
+document.getElementById('refreshShiftsBtn').addEventListener('click', () => {
+  const btn = document.getElementById('refreshShiftsBtn');
+  btn.disabled = true;
+  refreshShiftsView().catch(()=>{}).finally(()=> btn.disabled = false);
+});
 
 document.getElementById('btnShowActive').addEventListener('click', () => {
   document.getElementById('allList').style.display = 'none';
@@ -449,13 +620,15 @@ document.getElementById('btnFilterHistory').addEventListener('click', loadHistor
 /* ========== Internal navigation: show/hide sections ========== */
 const sectionUsers = document.getElementById('sectionUsers');
 const sectionShifts = document.getElementById('sectionShifts');
+const sectionGuards = document.getElementById('sectionGuards');
 const sectionHistory = document.getElementById('sectionHistory');
 const btnNavUsers = document.getElementById('btnNavUsers');
 const btnNavShifts = document.getElementById('btnNavShifts');
+const btnNavGuards = document.getElementById('btnNavGuards');
 const btnNavHistory = document.getElementById('btnNavHistory');
 
 function clearNavStyles() {
-  [btnNavUsers, btnNavShifts, btnNavHistory].forEach(b => {
+  [btnNavUsers, btnNavShifts, btnNavGuards, btnNavHistory].forEach(b => {
     b.classList.remove('btn-primary');
     b.classList.add('btn-outline-light');
   });
@@ -464,6 +637,7 @@ function clearNavStyles() {
 function showSection(name) {
   sectionUsers.classList.add('hidden');
   sectionShifts.classList.add('hidden');
+  sectionGuards.classList.add('hidden');
   sectionHistory.classList.add('hidden');
   clearNavStyles();
 
@@ -472,6 +646,11 @@ function showSection(name) {
     btnNavShifts.classList.add('btn-primary');
     loadGuardSelect(); refreshShiftsView();
     history.replaceState(null, '', '#shifts');
+  } else if (name === 'guards') {
+    sectionGuards.classList.remove('hidden');
+    btnNavGuards.classList.add('btn-primary');
+    loadGuardsForAdmin();
+    history.replaceState(null, '', '#guards');
   } else if (name === 'history') {
     sectionHistory.classList.remove('hidden');
     btnNavHistory.classList.add('btn-primary');
@@ -487,13 +666,14 @@ function showSection(name) {
 
 btnNavUsers.addEventListener('click', ()=> showSection('users'));
 btnNavShifts.addEventListener('click', ()=> showSection('shifts'));
+btnNavGuards.addEventListener('click', ()=> showSection('guards'));
 btnNavHistory.addEventListener('click', ()=> showSection('history'));
 
 /* On load: decide section by hash, load users by default */
 window.addEventListener('load', async () => {
-  // minimal initial state
   const h = location.hash.replace('#','');
   if (h === 'shifts') showSection('shifts');
+  else if (h === 'guards') showSection('guards');
   else if (h === 'history') showSection('history');
   else showSection('users');
 });

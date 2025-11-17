@@ -3,97 +3,131 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Bienvenido - Identificate</title>
+  <title>Bienvenido - Identifícate</title>
 
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-
   <script src="https://unpkg.com/html5-qrcode@2.3.8/minified/html5-qrcode.min.js"></script>
 
-
   <style>
-    body { padding: 1.25rem; background: #0b1220; color: #e6eef8; }
-    .card { border-radius: 12px; box-shadow: 0 6px 20px rgba(0,0,0,0.6); }
-    #reader { width: 360px; max-width:100%; margin: auto; }
-    #status { font-weight: 700; margin-top: 1rem; }
-    .led {
-      width: 24px; height: 24px; border-radius: 50%;
-      display:inline-block; margin-right: 8px; vertical-align: middle;
-      box-shadow: 0 0 6px rgba(0,0,0,0.5);
-      background: #444;
+    :root{
+      --bg: #07101a;
+      --card: #0b1724;
+      --muted: #94abc0;
+      --accent: #2f9cff;
+      --glass: rgba(255,255,255,0.03);
     }
-    .led.green { background: #2ecc71; box-shadow: 0 0 16px rgba(46,204,113,0.8); }
-    .led.red { background: #e74c3c; box-shadow: 0 0 16px rgba(231,76,60,0.8); }
-    .led.off { background: #444; box-shadow: none; }
-    #manual { margin-top: 1rem; }
-    .small-muted { color: #9fb0c8; font-size: .9rem; }
+    *{box-sizing:border-box}
+    body {
+      padding: 1.25rem;
+      background: linear-gradient(180deg, #051016 0%, #07101a 100%);
+      color: #e6eef8;
+      font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+      min-height:100vh;
+    }
+    .card {
+      background: linear-gradient(180deg, var(--card), #071421);
+      border: 1px solid rgba(255,255,255,0.03);
+      border-radius: 14px;
+      box-shadow: 0 10px 40px rgba(2,6,23,0.6);
+    }
+
+    h4 { font-weight:700; }
+    .small-muted { color: var(--muted); font-size: .95rem; }
+
+    /* Reader box */
+    #reader {
+      width: 420px;
+      max-width: 100%;
+      height: 320px;
+      margin: 0 auto;
+      border-radius: 10px;
+      overflow: hidden;
+      background: var(--glass);
+      display:flex;
+      align-items:center;
+      justify-content:center;
+    }
+
+    /* status */
+    #status { font-weight:700; margin-top:1rem; border-radius:8px; }
+    .led {
+      width: 20px; height: 20px; border-radius: 50%;
+      display:inline-block; margin-right: 10px; vertical-align: middle;
+      box-shadow: 0 0 8px rgba(0,0,0,0.5);
+      background: #3b4853;
+    }
+    .led.green { background: #2ecc71; box-shadow: 0 0 20px rgba(46,204,113,0.35); }
+    .led.red { background: #e74c3c; box-shadow: 0 0 20px rgba(231,76,60,0.35); }
+    .led.off { background: #3b4853; box-shadow: none; }
+
+    /* manual area removed — keep layout tidy */
+    .controls { display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+
     .busy { opacity: 0.6; pointer-events: none; }
+
+    /* responsive */
+    @media (max-width:720px) {
+      #reader { height: 260px; }
+      .controls { flex-direction:column; align-items:stretch; }
+    }
   </style>
 </head>
-
 <body>
   <div class="container">
-    <div class="card p-3 mt-4">
-      <h4>Bienvenido - Identificate</h4>
-      <p class="small-muted">Escanea un código QR o ingresa un token manualmente. El sistema verificará la autorización en Firebase.</p>
+    <div class="card p-4 mt-4">
+      <div class="d-flex justify-content-between align-items-start mb-3">
+        <div>
+          <h4>Bienvenido — Identifícate</h4>
+          <div class="small-muted">Escanea el código QR o usa el botón de historial para revisar registros.</div>
+        </div>
+        <div class="text-end">
+          <!-- historial permanece intacto -->
+          <a id="openHistoryBtn" href="history.html" class="btn btn-outline-light">Ver historial</a>
+        </div>
+      </div>
 
-      <div id="reader" class="my-2"></div>
+      <div id="reader" class="mb-3">
+        <div class="small-muted">Cámara inactiva — espera...</div>
+      </div>
 
       <div id="status" class="alert alert-secondary">Esperando escaneo...</div>
 
-      <div class="d-flex align-items-center my-2">
+      <div class="d-flex align-items-center my-2 controls">
         <span id="led" class="led off" title="Estado del acceso"></span>
-        <div>
-          <div id="statusText">Estado: esperando</div>
-          <div class="small-muted" id="subText">sin actividad</div>
+        <div style="flex:1">
+          <div id="statusText" style="font-weight:600">Estado: esperando</div>
+          <div id="subText" class="small-muted">sin actividad</div>
         </div>
+        <!-- dejamos el botón de historial también aquí para accesibilidad -->
       </div>
 
-      <div id="manual" class="mt-3">
-        <label for="manualToken" class="form-label small-muted">Entrada manual (solo JSON):</label>
-        <div class="input-group">
-          <input id="manualToken" class="form-control" placeholder='Ej: {"id":"est-001","token":"abc123"}' />
-          <button id="manualBtn" class="btn btn-primary">Enviar</button>
-            <a id="openHistoryBtn" href="history.html" class="btn btn-outline-secondary ms-2" role="button" title="Abrir historial">Ver historial</a>
-
-        </div>
-      </div>
-
-      <hr />
-      <div class="small-muted">Notas: Si el servidor está en otra máquina, actualiza la variable <b>BACKEND_URL</b> en el script.</div>
+      <!-- explicación breve -->
+      <hr style="border-color: rgba(255,255,255,0.03)" />
+      <div class="small-muted">Notas: Si el servidor corre en otra máquina, actualiza <code>BACKEND_URL</code> en el script.</div>
     </div>
   </div>
 
 <script>
 document.addEventListener("DOMContentLoaded", () => {
-  console.log("✅ DOM completamente cargado");
+  console.log("DOM cargado — index.js init");
 
-  // === CONFIGURACIÓN ===
-  const BACKEND_URL = "http://localhost:3000"; // Ajusta si usas otro host o puerto
+  // === CONFIG ===
+  const BACKEND_URL = "http://localhost:3000"; // ajusta si corresponde
   const SCAN_DEBOUNCE_MS = 1200;
-  const RETRY_ATTEMPTS = 3;
-  const RETRY_DELAY_MS = 800;
-
   let lastScan = 0;
   let processing = false;
 
+  // DOM refs
   const statusEl = document.getElementById('status');
   const statusText = document.getElementById('statusText');
   const subText = document.getElementById('subText');
   const ledEl = document.getElementById('led');
-  const manualBtn = document.getElementById('manualBtn');
-  const manualInput = document.getElementById('manualToken');
+  const readerEl = document.getElementById('reader');
 
-  if (!manualBtn) {
-    console.error("❌ No se encontró el botón manualBtn en el DOM");
-    return;
-  } else {
-    console.log("✅ Botón manualBtn detectado correctamente");
-  }
-
-  // === FUNCIONES DE INTERFAZ ===
-  function setStatus(kind, main, sub = '') {
+  // UI helpers
+  function setStatus(kind, main, sub='') {
     statusEl.className = 'alert';
-    switch(kind){
+    switch(kind) {
       case 'success': statusEl.classList.add('alert-success'); break;
       case 'error':   statusEl.classList.add('alert-danger');  break;
       case 'warning': statusEl.classList.add('alert-warning'); break;
@@ -111,7 +145,7 @@ document.addEventListener("DOMContentLoaded", () => {
     else ledEl.classList.add('off');
   }
 
-  // === LÓGICA QR Y ENVÍO ===
+  // parse QR payload (acepta JSON con id+token o simple token)
   function parseQrPayload(decodedText) {
     try {
       const obj = JSON.parse(decodedText);
@@ -120,9 +154,9 @@ document.addEventListener("DOMContentLoaded", () => {
     return { token: decodedText };
   }
 
+  // enviar a backend - usamos /verify para comportamiento actual
   async function sendToBackend(payload) {
     if (!payload || !payload.token) return { authorized:false, message:'Token vacío' };
-
     try {
       const resp = await fetch(`${BACKEND_URL}/verify`, {
         method: 'POST',
@@ -137,23 +171,25 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
+  // Core: procesar lectura QR
   async function processScanned(decodedText) {
-    console.log("📦 processScanned ejecutado con:", decodedText);
+    console.log("processScanned:", decodedText);
     const now = Date.now();
     if (processing || now - lastScan < SCAN_DEBOUNCE_MS) return;
     lastScan = now;
     processing = true;
     document.body.classList.add('busy');
-    setStatus('warning','Validando token...','Conectando al servidor');
 
+    setStatus('warning','Validando token...','Conectando al servidor');
     const payload = parseQrPayload(decodedText);
     const result = await sendToBackend(payload);
 
-    if (result && result.authorized) {
+    if (result && (result.authorized === true || result.authorized === 'true')) {
       setStatus('success','✔ Acceso autorizado', result.message || 'Autorizado');
       setLed('green');
     } else {
-      setStatus('error','✖ Acceso denegado', result.message || 'Token incorrecto');
+      // algunos endpoints devuelven { ok:true } u otros { authorized:true } — se manejan ambos arriba
+      setStatus('error','✖ Acceso denegado', result.message || (result.error || 'Token incorrecto'));
       setLed('red');
     }
 
@@ -161,50 +197,41 @@ document.addEventListener("DOMContentLoaded", () => {
     document.body.classList.remove('busy');
   }
 
-  // === ENTRADA MANUAL ===
-  manualBtn.addEventListener('click', async () => {
-    console.log("👉 Botón manual presionado");
-    const raw = manualInput.value.trim();
-    if (!raw) return setStatus('warning','Token vacío','Ingresa un token o JSON');
-    setStatus('warning','Validando token...','');
-    await processScanned(raw);
-  });
-
-  // === INICIALIZAR ESCÁNER (solo si hay cámara) ===
+  // Inicializar scanner (si hay cámara)
   if (window.Html5Qrcode) {
     Html5Qrcode.getCameras().then(cameras => {
       const camId = cameras.length ? cameras[0].id : null;
       if (camId) {
+        // eliminamos contenido previo dentro de #reader por seguridad
+        readerEl.innerHTML = '';
         const qr = new Html5Qrcode("reader");
-        qr.start(camId, { fps:10, qrbox:250 }, text => processScanned(text));
+        qr.start(camId, { fps: 10, qrbox: { width: 300, height: 300 } },
+          decodedText => processScanned(decodedText),
+          errorMessage => { /* ignore per-frame errors */ }
+        ).catch(err => {
+          console.error("No se pudo iniciar Html5Qrcode:", err);
+          readerEl.innerHTML = '<div class="small-muted">No se pudo iniciar la cámara.</div>';
+        });
       } else {
-        console.warn("⚠️ Cámara no detectada");
+        console.warn("Cámara no detectada");
+        readerEl.innerHTML = '<div class="small-muted">Cámara no detectada — utiliza un dispositivo con cámara.</div>';
       }
-    }).catch(err => console.error("Error iniciando cámara:", err));
+    }).catch(err => {
+      console.error("Error al obtener cámaras:", err);
+      readerEl.innerHTML = '<div class="small-muted">Error accediendo a la cámara.</div>';
+    });
+  } else {
+    console.warn("Html5Qrcode no cargado.");
+    readerEl.innerHTML = '<div class="small-muted">Escáner no disponible.</div>';
   }
 
-  // === AUTO RESET ===
+  // auto-reset visual cada cierto tiempo para volver a 'esperando'
   setInterval(() => {
     setLed('off');
     setStatus('info','Esperando escaneo...','');
   }, 7000);
 });
 </script>
-
-<!-- Insertar modal HTML somewhere in index.html -->
-<div id="guardModal" style="display:none; position:fixed; left:0; right:0; top:10%; margin:auto; width:380px; background:#fff; color:#000; padding:16px; border-radius:8px; z-index:9999;">
-  <h5>Autorización manual (Guardia)</h5>
-  <div><input id="gm_guardId" placeholder="guard id (ej: guard-03)" class="form-control mb-2"/></div>
-  <div><input id="gm_guardPin" placeholder="PIN" class="form-control mb-2"/></div>
-  <div><input id="gm_studentId" placeholder="studentId (opcional)" class="form-control mb-2"/></div>
-  <div><input id="gm_token" placeholder="token (opcional)" class="form-control mb-2"/></div>
-  <div class="d-flex justify-content-end">
-    <button id="gm_cancel" class="btn btn-secondary btn-sm me-2">Cancelar</button>
-    <button id="gm_submit" class="btn btn-primary btn-sm">Autorizar</button>
-  </div>
-  <div id="gm_msg" style="margin-top:8px;"></div>
-</div>
-
 
 </body>
 </html>

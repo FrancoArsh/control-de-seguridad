@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Admin Login — Control de Seguridad</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { background:#0f1724; color:#e6eef8; display:flex; align-items:center; justify-content:center; height:100vh; font-family:Inter,system-ui; }
+    .card { width:420px; padding:1.25rem; border-radius:12px; background:#071029; }
+    .small-muted { color:#9fb0c8; font-size:.9rem; }
+    .mono { font-family: monospace; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h4>Admin — Iniciar sesión</h4>
+    <p class="small-muted">Ingresa tu email y contraseña de administrador.</p>
+
+    <div id="alertArea"></div>
+
+    <form id="loginForm" autocomplete="on">
+      <div class="mb-2">
+        <input id="email" type="email" class="form-control" placeholder="Email" required>
+      </div>
+      <div class="mb-2">
+        <input id="password" type="password" class="form-control" placeholder="Password" required>
+      </div>
+
+      <div class="d-flex gap-2">
+        <button class="btn btn-primary flex-fill" type="submit" id="btnLogin">Iniciar sesión</button>
+        <a href="admin-register.html" class="btn btn-outline-light">Registrar</a>
+      </div>
+    </form>
+  </div>
+
+<script type="module">
+/* ---------------------------
+   IMPORTS FIREBASE (modular)
+   --------------------------- */
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+import { getAuth, signInWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
+import { getDatabase, ref, get } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
+
+/* ---------------------------
+   CONFIG — usa la misma que en register
+   --------------------------- */
+const firebaseConfig = {
+  apiKey: "AIzaSyA24_ilRt5u7BDJA7SfQFdUvTvA1_X6CM8",
+  authDomain: "control-de-seguridad-b4fa7.firebaseapp.com",
+  databaseURL: "https://control-de-seguridad-b4fa7-default-rtdb.firebaseio.com",
+  projectId: "control-de-seguridad-b4fa7",
+  storageBucket: "control-de-seguridad-b4fa7.firebasestorage.app",
+  messagingSenderId: "183262067576",
+  appId: "1:183262067576:web:285b6b69b198e58adbe68d"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getDatabase(app);
+
+/* ---------------------------
+   UI helpers
+   --------------------------- */
+function toast(msg, level='info', persist=false){
+  const a = document.getElementById('alertArea');
+  a.innerHTML = `<div class="alert alert-${level} p-2">${msg}</div>`;
+  if (!persist) setTimeout(()=> a.innerHTML = '', 3500);
+}
+
+function setLoading(on){
+  const btn = document.getElementById('btnLogin');
+  btn.disabled = on;
+  btn.textContent = on ? 'Procesando...' : 'Iniciar sesión';
+}
+
+/* ---------------------------
+   Login handler
+   --------------------------- */
+document.getElementById('loginForm').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  setLoading(true);
+  document.getElementById('alertArea').innerHTML = '';
+
+  const email = String(document.getElementById('email').value || '').trim();
+  const password = String(document.getElementById('password').value || '');
+
+  if (!email || !password) {
+    toast('Completa email y contraseña', 'warning');
+    setLoading(false);
+    return;
+  }
+
+  try {
+    console.log('[LOGIN] intentando signInWithEmailAndPassword', email);
+    const cred = await signInWithEmailAndPassword(auth, email, password);
+    const user = cred.user;
+    console.log('[LOGIN] signIn ok, uid=', user.uid);
+
+    // pedimos token (idToken)
+    const idToken = await user.getIdToken();
+    console.log('[LOGIN] idToken obtenida (longitud):', idToken ? idToken.length : 0);
+
+    // verificar que el uid exista en /admins y tenga role: 'admin'
+    try {
+      const adminSnap = await get(ref(db, `admins/${user.uid}`));
+      if (!adminSnap.exists()) {
+        console.warn('[LOGIN] No existe perfil admin en DB para uid:', user.uid);
+        toast('No tienes permisos de administrador (perfil admin no encontrado).', 'danger', true);
+        // opcional: cerrar sesión local
+        await auth.signOut().catch(()=>{});
+        setLoading(false);
+        return;
+      }
+
+      const profile = adminSnap.val();
+      console.log('[LOGIN] perfil admin desde DB:', profile);
+
+      if (profile.role !== 'admin') {
+        toast('Tu cuenta no tiene rol admin.', 'danger', true);
+        await auth.signOut().catch(()=>{});
+        setLoading(false);
+        return;
+      }
+
+      // OK -> guardar token + metadata en localStorage (dev)
+      localStorage.setItem('idToken', idToken);
+      localStorage.setItem('admin_user', profile.name || profile.email || email);
+      localStorage.setItem('admin_uid', user.uid);
+
+      toast('Login OK. Redirigiendo...', 'success');
+      setTimeout(()=> window.location.href = 'admin.html', 700);
+
+    } catch(dbErr) {
+      console.error('[LOGIN] error leyendo DB admins/:', dbErr);
+      // permiso denegado típico: reglas DB bloqueando la lectura
+      toast('No se puede comprobar perfil admin (Permission denied). Revisa reglas DB.', 'danger', true);
+      setLoading(false);
+      return;
+    }
+
+  } catch (err) {
+    console.error('[LOGIN] error auth:', err);
+    // Mensajes útiles para el usuario
+    const code = err?.code || '';
+    if (code === 'auth/wrong-password' || code === 'auth/invalid-password') {
+      toast('Contraseña incorrecta', 'danger');
+    } else if (code === 'auth/user-not-found') {
+      toast('Usuario no encontrado', 'danger');
+    } else if (code === 'auth/too-many-requests') {
+      toast('Demasiados intentos. Intenta más tarde', 'danger');
+    } else {
+      // fallback: mostrar mensaje de Firebase si existe
+      toast(err?.message || 'Error en autenticación', 'danger');
+    }
+    setLoading(false);
+    return;
+  }
+});
+</script>
+</body>
+</html>
