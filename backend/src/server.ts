@@ -588,10 +588,13 @@ app.post("/guard/login", async (req, res) => {
     let { id, pin } = req.body || {};
     if (!id || (pin === undefined || pin === null)) return res.status(400).json({ ok: false, error: "id & pin required" });
 
+    
     // Normalizar pin como string y trim
-    const pinStr = String(pin).trim();
+    id = String(id || '').trim();
+    const pinStr = pin === undefined || pin === null ? '' : String(pin).trim();
 
-    console.log('LOGIN ATTEMPT -> id:', id, 'pin_len:', pinStr.length);
+
+    console.log('LOGIN ATTEMPT -> id:', id, 'raw_pin:', JSON.stringify(pin), 'pin_len:', pinStr.length);
 
     const snap = await db.ref(`guards/${id}`).once("value");
     console.log('LOGIN DEBUG - snap.exists:', snap.exists());

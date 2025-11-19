@@ -1,5 +1,0 @@
-HEAD
-# control-de-seguridad
-
-
-
