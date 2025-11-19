@@ -2,6 +2,9 @@
   "name": "access-control-backend",
   "version": "1.0.0",
   "main": "dist/server.js",
+  "engines": {
+    "node": "20.x"
+  },
   "scripts": {
     "dev": "ts-node-dev src/server.ts",
     "build": "tsc",

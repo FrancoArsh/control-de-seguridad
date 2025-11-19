@@ -60,18 +60,36 @@ const SERVICE_ACCOUNT_PATH = process.env.GOOGLE_APPLICATION_CREDENTIALS || "./se
 const FIREBASE_DB_URL = process.env.FIREBASE_DATABASE_URL || "https://control-de-seguridad-b4fa7-default-rtdb.firebaseio.com/";
 
 let serviceAccount: any = null;
-try {
-  serviceAccount = JSON.parse(fs.readFileSync(path.resolve(SERVICE_ACCOUNT_PATH), "utf8"));
-} catch (e) {
-  console.warn("serviceAccountKey.json no encontrado; si haces admin ops localmente, colócalo en backend/.");
+if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+  try {
+    // En Railway pegaremos el contenido del JSON en esta variable
+    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    console.log("✅ [NUBE] Cargando credenciales desde variable de entorno.");
+  } catch (e) {
+    console.error("❌ Error leyendo la variable FIREBASE_SERVICE_ACCOUNT", e);
+  }
+} 
+// 2. Si no hay variable, buscamos el archivo (Tu PC Local)
+else {
+  const localPath = path.resolve(__dirname, "../serviceAccountKey.json");
+  if (fs.existsSync(localPath)) {
+    try {
+      serviceAccount = JSON.parse(fs.readFileSync(localPath, "utf8"));
+      console.log("✅ [LOCAL] Cargando credenciales desde archivo local.");
+    } catch (e) {
+      console.warn("⚠️ Error leyendo archivo local", e);
+    }
+  }
 }
 
+// 3. Iniciamos Firebase
 if (serviceAccount) {
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
     databaseURL: FIREBASE_DB_URL,
   });
 } else {
+  console.warn("⚠️ ADVERTENCIA: Iniciando SIN credenciales Admin. Algunas funciones fallarán.");
   admin.initializeApp({ databaseURL: FIREBASE_DB_URL });
 }
 
