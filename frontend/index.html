@@ -66,6 +66,42 @@
       .controls { flex-direction:column; align-items:stretch; }
     }
   </style>
+  <!-- html5-qrcode: try CDN then fallback to local copy -->
+<script>
+(function loadHtml5Qrcode() {
+  const cdn = "https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js";
+  function inject(src) {
+    return new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = src;
+      s.async = true;
+      s.onload = () => res(src);
+      s.onerror = (e) => rej(e);
+      document.head.appendChild(s);
+    });
+  }
+
+  inject(cdn)
+    .then(src => console.log('[INIT] html5-qrcode loaded from CDN:', src))
+    .catch(err => {
+      console.warn('[INIT] CDN failed, attempting local fallback. Error:', err);
+      // local fallback path (serve this file from your frontend folder)
+      return inject('/js/html5-qrcode.min.js')
+        .then(src => console.log('[INIT] html5-qrcode loaded locally:', src))
+        .catch(err2 => {
+          console.error('[INIT] local fallback also failed:', err2);
+          // inform user in UI
+          const r = document.getElementById('reader') || document.body;
+          const msg = document.createElement('div');
+          msg.style.color = 'salmon';
+          msg.style.padding = '12px';
+          msg.innerText = 'Error cargando el escáner (html5-qrcode). Revisa la consola.';
+          r.prepend(msg);
+        });
+    });
+})();
+</script>
+
 </head>
 <body>
   <div class="container">
@@ -101,7 +137,7 @@
 document.addEventListener("DOMContentLoaded", () => {
   console.log("DOM cargado — index.js init");
 
-  const BACKEND_URL = "http://localhost:3000";
+  const BACKEND_URL = "https://control-de-seguridad.onrender.com";
   const SCAN_DEBOUNCE_MS = 1200;
   let lastScan = 0;
   let processing = false;
