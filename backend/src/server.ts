@@ -1349,6 +1349,22 @@ app.post('/guards/create', async (req, res) => {
   }
 });
 
+const frontendPath = path.resolve(__dirname, "../..", "frontend");
+// Serve static files (css, js, images, html)
+app.use(express.static(frontendPath));
+
+// Root -> index.html
+app.get('/', (req, res) => {
+  res.sendFile(path.join(frontendPath, "index.html"));
+});
+
+// Optional: fallback for other non-API routes (helps SPA links) — only if you want it
+app.get(/^\/(?!guard|admin|history|verify|validate|users|api).*/, (req, res) => {
+  // if route doesn't start with an API prefix, send index.html so client-side routes work
+  res.sendFile(path.join(frontendPath, "index.html"));
+});
+
+
 /* --------------------
    Inicio servidor
    -------------------- */
