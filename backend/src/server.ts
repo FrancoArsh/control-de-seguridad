@@ -11,6 +11,31 @@ import crypto from "crypto";
 import jwt, { SignOptions, Secret } from "jsonwebtoken";
 import bcrypt from "bcrypt";
 
+const svcEnv = process.env.SERVICE_ACCOUNT_JSON || process.env.SERVICE_ACCOUNT_JSON_BASE64 || null;
+
+if (svcEnv) {
+  try {
+    const outPath = path.resolve(__dirname, '../serviceAccountKey.json');
+    // Si enviaron base64 (opcional), detectarlo:
+    let content = svcEnv;
+    // si parece base64 (opcional), decodificar
+    if (/^[A-Za-z0-9+/=\\s]+$/.test(svcEnv) && svcEnv.length > 200 && !svcEnv.trim().startsWith('{')) {
+      // intenta decodificar base64
+      try {
+        content = Buffer.from(svcEnv, 'base64').toString('utf8');
+      } catch (e) {
+        // no era base64, usan JSON directo
+      }
+    }
+    // Escribe el archivo (sobrescribe si ya existe)
+    fs.writeFileSync(outPath, typeof content === 'string' ? content : JSON.stringify(content), { encoding: 'utf8', flag: 'w' });
+    console.log('[INIT] Service account file written to', outPath);
+  } catch (e) {
+    console.error('[INIT] Could not write service account from env:', e);
+  }
+}
+// --- END ---
+
 dotenv.config();
 
 
@@ -606,10 +631,13 @@ app.post("/guard/login", async (req, res) => {
     let { id, pin } = req.body || {};
     if (!id || (pin === undefined || pin === null)) return res.status(400).json({ ok: false, error: "id & pin required" });
 
+    
     // Normalizar pin como string y trim
-    const pinStr = String(pin).trim();
+    id = String(id || '').trim();
+    const pinStr = pin === undefined || pin === null ? '' : String(pin).trim();
 
-    console.log('LOGIN ATTEMPT -> id:', id, 'pin_len:', pinStr.length);
+
+    console.log('LOGIN ATTEMPT -> id:', id, 'raw_pin:', JSON.stringify(pin), 'pin_len:', pinStr.length);
 
     const snap = await db.ref(`guards/${id}`).once("value");
     console.log('LOGIN DEBUG - snap.exists:', snap.exists());
@@ -1338,6 +1366,22 @@ app.post('/guards/create', async (req, res) => {
     res.status(500).json({ ok: false, error: 'server' });
   }
 });
+
+const frontendPath = path.resolve(__dirname, "../..", "frontend");
+// Serve static files (css, js, images, html)
+app.use(express.static(frontendPath));
+
+// Root -> index.html
+app.get('/', (req, res) => {
+  res.sendFile(path.join(frontendPath, "index.html"));
+});
+
+// Optional: fallback for other non-API routes (helps SPA links) — only if you want it
+app.get(/^\/(?!guard|admin|history|verify|validate|users|api).*/, (req, res) => {
+  // if route doesn't start with an API prefix, send index.html so client-side routes work
+  res.sendFile(path.join(frontendPath, "index.html"));
+});
+
 
 /* --------------------
    Inicio servidor
