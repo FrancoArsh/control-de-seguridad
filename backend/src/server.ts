@@ -11,6 +11,31 @@ import crypto from "crypto";
 import jwt, { SignOptions, Secret } from "jsonwebtoken";
 import bcrypt from "bcrypt";
 
+const svcEnv = process.env.SERVICE_ACCOUNT_JSON || process.env.SERVICE_ACCOUNT_JSON_BASE64 || null;
+
+if (svcEnv) {
+  try {
+    const outPath = path.resolve(__dirname, '../serviceAccountKey.json');
+    // Si enviaron base64 (opcional), detectarlo:
+    let content = svcEnv;
+    // si parece base64 (opcional), decodificar
+    if (/^[A-Za-z0-9+/=\\s]+$/.test(svcEnv) && svcEnv.length > 200 && !svcEnv.trim().startsWith('{')) {
+      // intenta decodificar base64
+      try {
+        content = Buffer.from(svcEnv, 'base64').toString('utf8');
+      } catch (e) {
+        // no era base64, usan JSON directo
+      }
+    }
+    // Escribe el archivo (sobrescribe si ya existe)
+    fs.writeFileSync(outPath, typeof content === 'string' ? content : JSON.stringify(content), { encoding: 'utf8', flag: 'w' });
+    console.log('[INIT] Service account file written to', outPath);
+  } catch (e) {
+    console.error('[INIT] Could not write service account from env:', e);
+  }
+}
+// --- END ---
+
 dotenv.config();
 
 
