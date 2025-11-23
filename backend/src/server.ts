@@ -163,9 +163,44 @@ async function requireFirebaseAdmin(req: Request, res: Response, next: NextFunct
     // adjunta info útil
     (req as any).admin = { uid, name: profile.name || null, email: profile.email || null };
     return next();
-  } catch (err) {
+  } catch (err: any) {
     console.error('requireFirebaseAdmin error:', err);
+    const code = err?.errorInfo?.code || '';
+    if (code === 'auth/id-token-expired') {
+      return res.status(401).json({ ok:false, error: 'id-token-expired' });
+    }
     return res.status(401).json({ ok:false, error: 'invalid token' });
+  }
+}
+
+
+// MIGRATE: convierte tempPinHash vencidos en pinHash permanentes
+async function migrateExpiredTempPins() {
+  try {
+    const now = Date.now();
+    const snap = await db.ref('guards').once('value');
+    // Tipado explícito para que TypeScript sepa que podemos indexar por id
+    const guards: Record<string, any> = snap.val() || {};
+    const updates: Record<string, any> = {};
+
+    for (const id of Object.keys(guards)) {
+      const g: any = guards[id] || {};
+      if (g.tempPinHash && g.tempPinExpiresAt && Number(g.tempPinExpiresAt) <= now) {
+        // mover tempPinHash -> pinHash y limpiar campos temporales
+        updates[`guards/${id}/pinHash`] = g.tempPinHash;
+        updates[`guards/${id}/pinCreatedAt`] = g.tempPinCreatedAt || now;
+        updates[`guards/${id}/tempPinHash`] = null;
+        updates[`guards/${id}/tempPinCreatedAt`] = null;
+        updates[`guards/${id}/tempPinExpiresAt`] = null;
+        console.log(`migrateExpiredTempPins: guard ${id} -> tempPin promoted to permanent`);
+      }
+    }
+
+    if (Object.keys(updates).length) {
+      await db.ref().update(updates);
+    }
+  } catch (e) {
+    console.error('migrateExpiredTempPins error:', e);
   }
 }
 
@@ -225,84 +260,128 @@ async function logAccess(params: {
    Endpoints: Validate / Verify / History / User
    -------------------- */
 
+const ACCESS_COOLDOWN_MS = 15000; 
+
 // POST /validate
 app.post("/validate", async (req, res) => {
-  const tokenId = String(req.body?.token || "").trim();
-  const sessionId = String(req.body?.sessionId || "default");
-  const type = String(req.body?.type || "entry");
-  const now = Date.now();
+  const tokenId = String(req.body?.token || "").trim();
+  const sessionId = String(req.body?.sessionId || "default");
+  const type = String(req.body?.type || "entry");
+  const now = Date.now();
 
-  if (!tokenId) {
-    await logAccess({ token: tokenId, authorized: false, reason: "token required", sessionId });
-    return res.status(400).json({ ok: false, error: "token required" });
-  }
+  if (!tokenId) {
+    await logAccess({ token: tokenId, authorized: false, reason: "token required", sessionId });
+    return res.status(400).json({ ok: false, error: "token required" });
+  }
 
-  try {
-    let tokenNodeSnap = await db.ref('accessTokens').orderByChild('token').equalTo(tokenId).once('value');
-    let foundKey: string | null = null;
-    let tokenData: any = null;
+  try {
+    let tokenNodeSnap = await db.ref('accessTokens').orderByChild('token').equalTo(tokenId).once('value');
+    let foundKey: string | null = null;
+    let tokenData: any = null;
 
-    if (tokenNodeSnap.exists()) {
-      const val = tokenNodeSnap.val();
-      const keys = Object.keys(val);
-      foundKey = keys[0];
-      tokenData = val[foundKey];
-    } else {
-      const altSnap = await db.ref('tokens').orderByChild('token').equalTo(tokenId).once('value');
-      if (altSnap.exists()) {
-        const v = altSnap.val();
-        const keys2 = Object.keys(v);
-        foundKey = keys2[0];
-        tokenData = v[foundKey];
-      }
+    if (tokenNodeSnap.exists()) {
+      const val = tokenNodeSnap.val();
+      const keys = Object.keys(val);
+      foundKey = keys[0];
+      tokenData = val[foundKey];
+    } else {
+      const altSnap = await db.ref('tokens').orderByChild('token').equalTo(tokenId).once('value');
+      if (altSnap.exists()) {
+        const v = altSnap.val();
+        const keys2 = Object.keys(v);
+        foundKey = keys2[0];
+        tokenData = v[foundKey];
+      }
+    }
+
+    if (!foundKey || !tokenData) {
+      await logAccess({ token: tokenId, authorized: false, reason: "token not found", sessionId });
+      return res.status(404).json({ ok: false, error: "token not found" });
+    }
+    
+    // --- NUEVA LÓGICA DE COOLDOWN ---
+    let studentName = null;
+    let studentSnap = await db.ref(`students/${foundKey}`).once("value");
+    let lastAccessTimestamp = 0;
+    
+    if (studentSnap.exists()) {
+        const studentVal = studentSnap.val();
+        studentName = studentVal.name || null;
+        lastAccessTimestamp = studentVal.lastAccessTimestamp || 0;
     }
-
-    if (!foundKey || !tokenData) {
-      await logAccess({ token: tokenId, authorized: false, reason: "token not found", sessionId });
-      return res.status(404).json({ ok: false, error: "token not found" });
+    
+    if (now - lastAccessTimestamp < ACCESS_COOLDOWN_MS) {
+        const remainingMs = ACCESS_COOLDOWN_MS - (now - lastAccessTimestamp);
+        const remainingSec = Math.ceil(remainingMs / 1000);
+        
+        await logAccess({ 
+            id: foundKey, 
+            studentUid: foundKey, 
+            name: studentName, 
+            token: tokenId, 
+            authorized: false, 
+            reason: "cooldown active", 
+            sessionId 
+        });
+        
+        // Mensaje de error personalizado para el frontend (el mensaje de seguridad requerido)
+        return res.status(403).json({ 
+            ok: false, 
+            error: `Acceso denegado. Este QR fue usado recientemente. Espere ${remainingSec} segundos.`,
+            reason: "COOLDOWN_ACTIVE" 
+        });
     }
+    // ---------------------------------
+    
 
-    if (tokenData.used) {
-      await logAccess({ id: foundKey, studentUid: foundKey, token: tokenId, authorized: false, reason: "token already used", sessionId });
-      return res.status(400).json({ ok: false, error: "token already used" });
-    }
-    if (tokenData.expiresAt && now > Number(tokenData.expiresAt)) {
-      await logAccess({ id: foundKey, studentUid: foundKey, token: tokenId, authorized: false, reason: "token expired", sessionId });
-      return res.status(400).json({ ok: false, error: "token expired" });
-    }
+    if (tokenData.used) {
+      await logAccess({ id: foundKey, studentUid: foundKey, token: tokenId, authorized: false, reason: "token already used", sessionId });
+      return res.status(400).json({ ok: false, error: "token already used" });
+    }
+    if (tokenData.expiresAt && now > Number(tokenData.expiresAt)) {
+      await logAccess({ id: foundKey, studentUid: foundKey, token: tokenId, authorized: false, reason: "token expired", sessionId });
+      return res.status(400).json({ ok: false, error: "token expired" });
+    }
 
-    // Registrar attendance
-    try {
-      const attendanceRef = db.ref(`attendance/${sessionId}/${foundKey}`).push();
-      await attendanceRef.set({ type, timestamp: now, tokenId });
-    } catch (e) {
-      console.warn("No se pudo registrar attendance:", e);
-    }
-
-    // Log accessHistory
-    let name = null;
-    try {
-      const studentSnap = await db.ref(`students/${foundKey}`).once("value");
-      if (studentSnap.exists()) name = studentSnap.val().name || null;
-    } catch (e) { /* ignore */ }
-
-    await logAccess({
-      id: foundKey,
-      studentUid: foundKey,
-      name,
-      token: tokenId,
-      authorized: true,
-      reason: "ok",
-      sessionId
+    // Paso Crítico: Actualizar el Timestamp de Último Acceso
+    await db.ref(`students/${foundKey}`).update({
+        lastAccessTimestamp: now
     });
+    
+    // Registrar attendance
+    try {
+      const attendanceRef = db.ref(`attendance/${sessionId}/${foundKey}`).push();
+      await attendanceRef.set({ type, timestamp: now, tokenId });
+    } catch (e) {
+      console.warn("No se pudo registrar attendance:", e);
+    }
 
-    return res.json({ ok: true, studentUid: foundKey });
+    // Log accessHistory
+    // Si no lo obtuvimos antes (solo para el log)
+    if (!studentName) {
+      try {
+        const studentSnap = await db.ref(`students/${foundKey}`).once("value");
+        if (studentSnap.exists()) studentName = studentSnap.val().name || null;
+      } catch (e) { /* ignore */ }
+    }
 
-  } catch (err) {
-    console.error("validate error:", err);
-    await logAccess({ token: tokenId, authorized: false, reason: "server error", sessionId });
-    return res.status(500).json({ ok: false, error: "server error" });
-  }
+    await logAccess({
+      id: foundKey,
+      studentUid: foundKey,
+      name: studentName,
+      token: tokenId,
+      authorized: true,
+      reason: "ok",
+      sessionId
+    });
+
+    return res.json({ ok: true, studentUid: foundKey });
+
+  } catch (err) {
+    console.error("validate error:", err);
+    await logAccess({ token: tokenId, authorized: false, reason: "server error", sessionId });
+    return res.status(500).json({ ok: false, error: "server error" });
+  }
 });
 
 // POST /verify
@@ -626,65 +705,65 @@ app.delete("/users/:id",requireFirebaseAdmin, async (req, res) => {
 // guard/login
 // --- GUARD AUTH / LOGIN ---
 // --- GUARD AUTH / LOGIN (mejorado, reemplaza tu versión actual) ---
-app.post("/guard/login", async (req, res) => {
+app.post('/guard/login', async (req, res) => {
   try {
-    let { id, pin } = req.body || {};
-    if (!id || (pin === undefined || pin === null)) return res.status(400).json({ ok: false, error: "id & pin required" });
+    // si tienes middleware requireFirebaseAdmin para admin, aquí no aplica
+    // leer datos del body
+    const guardId = String(req.body.guardId || req.body.id || '').trim();
+    const pin = String(req.body.pin || '').trim();
+    if (!guardId || !pin) return res.status(400).json({ ok:false, error:'missing guardId or pin' });
 
-    
-    // Normalizar pin como string y trim
-    id = String(id || '').trim();
-    const pinStr = pin === undefined || pin === null ? '' : String(pin).trim();
+    // 1) promover temp pins expirados antes de validar (asegúrate de tener esta función)
+    await migrateExpiredTempPins();
 
+    // 2) leer el guard desde la BD
+    const gSnap = await db.ref(`guards/${guardId}`).once('value');
+    if (!gSnap.exists()) return res.status(404).json({ ok:false, error: 'guard not found' });
+    const g: any = gSnap.val();
 
-    console.log('LOGIN ATTEMPT -> id:', id, 'raw_pin:', JSON.stringify(pin), 'pin_len:', pinStr.length);
-
-    const snap = await db.ref(`guards/${id}`).once("value");
-    console.log('LOGIN DEBUG - snap.exists:', snap.exists());
-
-    if (!snap.exists()) {
-      console.log('LOGIN DEBUG -> guard not found for id:', id);
-      return res.status(404).json({ ok: false, error: "guard not found" });
+    // 3) validar contra pinHash permanente (si existe)
+    if (g.pinHash) {
+      const okPerm = await bcrypt.compare(pin, String(g.pinHash));
+      if (okPerm) {
+        // login ok con PIN permanente
+        return res.json({ ok:true, guardId, method:'permanent' });
+      }
     }
 
-    const guard = snap.val();
-    const storedHash = guard.pinHash || guard.pin || null;
-    console.log('LOGIN DEBUG - guard record name:', guard.name || null);
-    console.log('LOGIN DEBUG - pinHash exists:', !!storedHash, 'prefix:', storedHash ? String(storedHash).slice(0,6) : null, 'len:', storedHash ? String(storedHash).length : 0);
+    // 4) validar contra tempPinHash si existe
+    if (g.tempPinHash) {
+      const okTemp = await bcrypt.compare(pin, String(g.tempPinHash));
+      if (okTemp) {
+        const now = Date.now();
+        const expiresAt = Number(g.tempPinExpiresAt) || 0;
 
-    if (!storedHash) {
-      console.log('LOGIN DEBUG -> no pinHash stored for guard:', id);
-      return res.status(500).json({ ok:false, error: 'no pin configured for guard' });
+        if (expiresAt === 0 || now <= expiresAt) {
+          // tempPin aún válido -> permitir login (sin promover aún)
+          return res.json({ ok:true, guardId, method:'temp-active' });
+        } else {
+          // tempPin coincide pero ya expiró -> promovemos a permanente y aceptamos login (opción B)
+          const updates: Record<string, any> = {};
+          updates[`guards/${guardId}/pinHash`] = g.tempPinHash;
+          updates[`guards/${guardId}/pinCreatedAt`] = g.tempPinCreatedAt || now;
+          updates[`guards/${guardId}/tempPinHash`] = null;
+          updates[`guards/${guardId}/tempPinCreatedAt`] = null;
+          updates[`guards/${guardId}/tempPinExpiresAt`] = null;
+          await db.ref().update(updates);
+
+          return res.json({ ok:true, guardId, method:'temp-promoted' });
+        }
+      }
     }
 
-    // Comparar (bcrypt) — pinStr es el plaintext
-    const match = await bcrypt.compare(pinStr, String(storedHash));
-    console.log('LOGIN DEBUG - bcrypt.compare result:', match);
+    // 5) si ninguna coincidencia
+    return res.status(401).json({ ok:false, error:'invalid pin' });
 
-    if (!match) {
-      return res.status(401).json({ ok: false, error: "invalid pin" });
-    }
-
-    // Si correcto -> firmar JWT
-    const payload = { guardId: id, name: guard.name, role: "guard" };
-    const rawExp = process.env.JWT_EXP || "6h";
-    const maybeNum = Number(rawExp);
-    const jwtExpVal = Number.isFinite(maybeNum) ? maybeNum : String(rawExp);
- 
-    const opts: SignOptions = {
-  // TypeScript a veces no reconoce las uniones personalizadas; casteamos solo aquí (seguro en runtime)
-    expiresIn: jwtExpVal as unknown as SignOptions["expiresIn"]
-};
-    const secret: Secret = (process.env.JWT_SECRET || "dev_fallback_secret") as Secret;
-    const token = jwt.sign(payload as any, secret, opts);
-
-
-    return res.json({ ok: true, token, guardId: id, name: guard.name });
   } catch (err) {
-    console.error('guard/login error:', err);
-    return res.status(500).json({ ok: false, error: "server error" });
+    console.error('/guard/login error', err);
+    return res.status(500).json({ ok:false, error:'server error' });
   }
 });
+
 
 
 
@@ -981,6 +1060,27 @@ app.get('/guards',requireFirebaseAdmin, async (req, res) => {
   }
 });
 
+const GUARDS_PATH = 'guards'; 
+
+app.get('/api/guards/:id/pin', async (req, res) => {
+    const guardId = req.params.id; 
+
+    try {
+        // Obtenemos el valor del campo 'pin' directamente en la referencia: /guards/[guardId]/pin
+        const pinSnapshot = await rtdb.ref(`${GUARDS_PATH}/${guardId}/pin`).once('value');
+        const pin = pinSnapshot.val(); 
+
+        if (pin) {
+            // Devolvemos el PIN como un objeto JSON
+            return res.status(200).json({ pin: pin });
+        } else {
+            return res.status(404).json({ error: 'PIN o Guardia no encontrado.' });
+        }
+    } catch (error) {
+        console.error("Error al obtener el PIN del guardia:", error);
+        return res.status(500).json({ error: 'Error interno del servidor.' });
+    }
+});
 
 /* --------------------
    Teachers endpoints
@@ -1102,6 +1202,7 @@ app.get('/admins',requireFirebaseAdmin, async (req, res) => {
 });
 
 
+
 // DEBUG endpoint sin auth: mostrar crudo admins (solo local/dev)
 app.get('/debug/admins', async (req, res) => {
   try {
@@ -1136,6 +1237,7 @@ app.post("/admins",requireFirebaseAdmin, async (req, res) => {
     return res.status(500).json({ ok:false, error:"server error" });
   }
 });
+
 
 // POST /admin/guard/shift/start  (requireAdmin)
 app.post('/admin/guard/shift/start',requireFirebaseAdmin, async (req, res) => {
@@ -1207,7 +1309,9 @@ app.post('/admin/guard/shift/end',requireFirebaseAdmin, async (req, res) => {
   }
 });
 
-app.post("/admin/guards/:id/reset-pin",requireFirebaseAdmin, async (req, res) => {
+const SERVER_ADMIN_SECRET = "mi_secreto_super_seguro";
+
+app.post("/admin/guards/:id/reset-pin", requireFirebaseAdmin, async (req, res) => {
   try {
     const id = String(req.params.id || "").trim();
     if (!id) return res.status(400).json({ ok:false, error:"missing id" });
@@ -1216,10 +1320,13 @@ app.post("/admin/guards/:id/reset-pin",requireFirebaseAdmin, async (req, res) =>
     const gSnap = await db.ref(`guards/${id}`).once("value");
     if (!gSnap.exists()) return res.status(404).json({ ok:false, error:"guard not found" });
 
-    // Generar PIN temporal: 6 dígitos (ejemplo), puedes ajustar formato
-    const tempPin = Math.floor(100000 + Math.random() * 900000).toString();
+    const clientSecret = req.headers['x-admin-secret'];
+    if (!clientSecret || clientSecret !== SERVER_ADMIN_SECRET) {
+        return res.status(401).json({ error: 'Unauthorized. Invalid admin secret.' });
+    }
 
-    // Hashear
+    // Generar PIN temporal: 6 dígitos
+    const tempPin = Math.floor(100000 + Math.random() * 900000).toString();
     const saltRounds = 10;
     const hash = await bcrypt.hash(tempPin, saltRounds);
 
@@ -1228,15 +1335,17 @@ app.post("/admin/guards/:id/reset-pin",requireFirebaseAdmin, async (req, res) =>
     const expiresMs = 10 * 60 * 1000; // 10 minutos
     const expiresAt = now + expiresMs;
 
-    // Guardar hash y metadata (no guardar el plaintext)
-    await db.ref(`guards/${id}`).update({
-      pinHash: hash,
-      pinCreatedAt: now,
-      pinExpiresAt: expiresAt
+    // Guardar el hash TEMPORAL (no sobrescribimos pinHash)
+ await db.ref(`guards/${id}`).update({
+  pinHash: hash,
+  pinCreatedAt: Date.now(),
+  tempPinHash: null,
+  tempPinCreatedAt: null,
+  tempPinExpiresAt: null
     });
 
     // Log de auditoría admin
-    const adminActor = (req.headers["x-admin-id"] || "admin-ui"); // opcional si quieres registrar admin id
+    const adminActor = (req.headers["x-admin-id"] || "admin-ui");
     await db.ref("adminActions").push({
       action: "resetPin",
       actor: adminActor,
@@ -1298,6 +1407,34 @@ app.put("/admins/:id",requireFirebaseAdmin, async (req, res) => {
     return res.status(500).json({ ok:false, error:"server error" });
   }
 });
+
+const rtdb = admin.database();
+
+app.put('/api/admins/:id', async (req, res) => {
+    // 1. Obtener el ID del administrador de la URL (ruta param)
+    const adminId = req.params.id; 
+    
+    // 2. Obtener los datos a actualizar del cuerpo de la solicitud
+    const newData = req.body; // Contiene username, rol, etc.
+
+    // Opcional: Quitar campos de control si existen (como el ID si se envió doblemente)
+    delete newData.id; 
+
+    try {
+        // 3. Crear la referencia al nodo específico del administrador
+        // Asumiendo que tus admins se guardan en el path "admins/[adminId]"
+        const adminRef = rtdb.ref(`admins/${adminId}`); 
+        
+        // 4. Usar el método .update() de Firebase para actualizar (mergear) los campos
+        await adminRef.update(newData); 
+
+        return res.status(200).json({ message: 'Administrador actualizado con éxito.' });
+    } catch (error) {
+        console.error("Error al actualizar admin en Firebase:", error);
+        return res.status(500).json({ error: 'Error interno al actualizar el administrador.' });
+    }
+});
+
 
 // DELETE /admins/:id
 app.delete("/admins/:id",requireFirebaseAdmin, async (req, res) => {

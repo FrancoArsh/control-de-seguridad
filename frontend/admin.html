@@ -6,6 +6,7 @@
   <title>Admin — Control de Seguridad (Usuarios & Shifts & Historial & Guardias)</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
+    /* User + theme styles */
     body { background:#0f1724; color:#e6eef8; padding:1rem; }
     .card { border-radius:10px; }
     .muted { color:#9fb0c8; }
@@ -17,6 +18,36 @@
     #pinModal { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:9999; }
     #pinModal .modal-box { background:#fff; color:#000; padding:1rem; border-radius:8px; width: 360px; max-width:95%; }
     #guardsPane { max-height:520px; overflow:auto; }
+
+    /* ==== Injected improvements - dark cards + visible buttons ==== */
+    .card {
+      background: #0b1320 !important;
+      color: #e6eef8 !important;
+      border: 1px solid rgba(255,255,255,0.04) !important;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+    }
+    .card .table,
+    .card .table-responsive {
+      background: transparent !important;
+    }
+    .btn-outline-light {
+      color: #e6eef8 !important;
+      border-color: rgba(255,255,255,0.12) !important;
+      background: transparent !important;
+    }
+    .btn-outline-light:disabled,
+    .btn-outline-light.disabled {
+      opacity: 0.6;
+      background: rgba(255,255,255,0.02);
+      color: #cfe0ee !important;
+    }
+    /* improve disabled buttons contrast */
+    .btn:disabled, .btn.disabled {
+      opacity: 0.9;
+      background: rgba(255,255,255,0.02);
+      color: #e6eef8;
+      border-color: rgba(255,255,255,0.06);
+    }
   </style>
 </head>
 <body>
@@ -69,7 +100,7 @@
 
       <div class="table-responsive mt-2">
         <table class="table table-sm table-borderless text-white">
-          <thead class="muted"><tr><th>ID</th><th>Nombre</th><th>Rol</th><th>Token</th><th>QR</th><th>Acciones</th></tr></thead>
+          <thead class="muted"><tr><th>ID</th><th>Nombre</th><th>Rol</th><th>Token</th><th>  </th><th>Acciones</th></tr></thead>
           <tbody id="usersBody"><tr><td colspan="6" class="muted">Cargando...</td></tr></tbody>
         </table>
       </div>
@@ -79,7 +110,6 @@
     <section id="sectionShifts" class="card p-3 mb-3 hidden">
       <div class="d-flex justify-content-between align-items-center mb-2">
         <h5 class="m-0">Turnos — Guardias</h5>
-        <div class="small-muted">Inicia / finaliza turnos de guardias y revisa historial por turno</div>
       </div>
 
       <div class="row g-2 mb-2">
@@ -147,15 +177,12 @@
 
             <div class="mt-3">
               <button id="btnResetPinLocal" class="btn btn-warning">Ver / Generar PIN (admin)</button>
-              <button id="btnViewShiftsForGuard" class="btn btn-outline-light">Ver turnos</button>
             </div>
 
             <div id="guardPinResult" class="mt-3"></div>
           </div>
         </div>
       </div>
-
-      <div class="mt-3 small-muted">Nota: el PIN se muestra una sola vez — el backend genera un PIN temporal y lo devuelve en la respuesta.</div>
     </section>
 
     <!-- SECTION: HISTORY (Admin - Access Logs) -->
@@ -199,12 +226,11 @@
 
   </div>
 
-  <!-- PIN modal (mostrar PIN temporal solo una vez) -->
-  <div id="pinModal" aria-hidden="true">
+  <!-- PIN modal (mostrar PIN una vez) -->
+  <div id="pinModal" aria-hidden="true" style="display:none; align-items:center; justify-content:center;">
     <div class="modal-box">
-      <h5>PIN temporal (cópialo ahora)</h5>
+      <h5>PIN (cópialo ahora)</h5>
       <p id="pinValue" style="font-size:1.4rem; font-weight:700; margin:0.5rem 0;">—</p>
-      <p class="small-muted">Expira: <span id="pinExpires">—</span></p>
       <div class="d-flex gap-2 mt-2">
         <button id="btnCopyPin" class="btn btn-primary btn-sm">Copiar</button>
         <button id="btnClosePin" class="btn btn-secondary btn-sm">Cerrar</button>
@@ -214,7 +240,7 @@
 
 <script>
 /* ====== CONFIG: ajusta según tu entorno ====== */
-const BACKEND_URL = "control-de-seguridad-production.up.railway.app";   // cambia si corresponde
+const BACKEND_URL = "http://localhost:3000";   // cambia si corresponde
 // admin secret se saca de localStorage si está; hay fallback
 const ADMIN_SECRET = localStorage.getItem('admin_secret') || "mi_secreto_super_seguro";
 /* ============================================ */
@@ -248,9 +274,51 @@ async function adminFetch(path, opts = {}) {
     opts.body = JSON.stringify(opts.body);
     opts.headers['Content-Type'] = 'application/json';
   }
-  const res = await fetch(`${BACKEND_URL}${path}`, opts);
-  const json = await res.json().catch(()=>({ ok:false, error:'invalid json' }));
-  return { ok: res.ok, status: res.status, body: json };
+
+  try {
+    const res = await fetch(`${BACKEND_URL}${path}`, opts);
+    const json = await res.json().catch(()=>({ ok:false, error:'invalid json' }));
+
+    // Detect token-expired from backend and force re-login
+    if (res.status === 401 && json && (json.error === 'id-token-expired' || (json.error||'').toLowerCase().includes('expired'))) {
+      toast('Sesión expirada. Vuelve a iniciar sesión.', 'warning', 5000);
+      // limpiar idToken para evitar bucles
+      localStorage.removeItem('idToken');
+      setTimeout(()=> { window.location.href = 'admin-login.html'; }, 1200);
+      return { ok:false, status: res.status, body: json };
+    }
+
+    return { ok: res.ok, status: res.status, body: json };
+  } catch (e) {
+    console.error('adminFetch network error', e);
+    return { ok:false, status: 0, body: { error: 'network' } };
+  }
+}
+
+async function handleAdminSubmit(formData) {
+    const adminId = formData.get('id_oculto_original'); // Obtén el ID guardado
+    const data = Object.fromEntries(formData.entries());
+
+    let url;
+    let method;
+
+    if (adminId) {
+        // Es una EDICIÓN
+        url = `${BACKEND_URL}/api/admins/${adminId}`;
+        method = 'PUT'; // 👈 Método para ACTUALIZAR
+        // Debes asegurarte de que tu función de fetch pueda manejar PUT
+    } else {
+        // Es una CREACIÓN
+        url = `${BACKEND_URL}/api/admins`;
+        method = 'POST'; // 👈 Método para CREAR
+    }
+
+    // Realiza la solicitud fetch con el método y la URL correctos
+    const response = await fetch(url, {
+        method: method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+    });
 }
 
 /* ===================== USERS ===================== */
@@ -348,7 +416,12 @@ async function loadGuardsForAdmin() {
   pane.innerHTML = '<div class="muted p-2">Cargando guardias...</div>';
   try {
     const r = await adminFetch('/guards', { method: 'GET' });
-    if (!r.ok) { pane.innerHTML = `<div class="muted p-2">Error: ${r.body?.error || r.status}</div>`; return; }
+    if (!r.ok) {
+      // If unauthorized due to expired token, adminFetch already redirected user to login.
+      // Show a friendly message otherwise.
+      pane.innerHTML = `<div class="muted p-2">Error: ${r.body?.error || r.status}</div>`;
+      return;
+    }
     const rows = r.body.data || [];
     guardsCache = rows;
     if (!rows.length) { pane.innerHTML = '<div class="muted p-2">No hay guardias registrados</div>'; return; }
@@ -386,38 +459,69 @@ function selectGuard(g) {
   document.getElementById('gdMeta').textContent = g.createdAt ? ('Creado: ' + new Date(g.createdAt).toLocaleString()) : 'Creado: —';
   document.getElementById('guardPinResult').innerHTML = '';
 }
-
 /* cuando el admin presiona "Ver / Generar PIN" -> llama al endpoint reset-pin (protegido)
    y muestra el tempPin en el modal. */
 document.getElementById('btnResetPinLocal')?.addEventListener('click', async () => {
   if (!selectedGuard) { toast('Selecciona un guard primero','warning'); return; }
-  if (!confirm(`Generar PIN temporal para ${selectedGuard.id}? (se mostrará solo una vez)`)) return;
+  if (!confirm(`Generar PIN para ${selectedGuard.id}? (se mostrará solo una vez)`)) return;
+
+  const btn = document.getElementById('btnResetPinLocal');
+  btn.disabled = true;
+
   try {
-    const res = await fetch(`${BACKEND_URL}/admin/guards/${encodeURIComponent(selectedGuard.id)}/reset-pin`, {
+    // Usamos adminFetch para incluir Authorization + x-admin-secret automáticamente
+    const r = await adminFetch(`/admin/guards/${encodeURIComponent(selectedGuard.id)}/reset-pin`, {
       method: 'POST',
-      headers: { 'Content-Type':'application/json', 'x-admin-secret': ADMIN_SECRET },
-      body: JSON.stringify({})
+      body: {} // si quieres enviar nota, agrégala aquí: { note: '...' }
     });
-    const js = await res.json();
-    if (!res.ok) { toast(js.error || 'Error', 'danger'); return; }
 
-    // mostrar modal con PIN temporal
-    document.getElementById('pinValue').textContent = js.tempPin || '—';
-    document.getElementById('pinExpires').textContent = js.expiresAt ? new Date(js.expiresAt).toLocaleString() : '—';
-    document.getElementById('pinModal').style.display = 'flex';
+    if (!r.ok) {
+      // r.body puede tener detalle del error
+      const errMsg = (r.body && (r.body.error || r.body.message)) || `HTTP ${r.status}`;
+      toast('Error: ' + errMsg, 'danger');
+      console.error('reset-pin failed', r);
+      return;
+    }
 
-    document.getElementById('guardPinResult').innerHTML = `<div class="alert alert-success p-2">PIN generado. Se mostró en modal — cópialo ahora.</div>`;
+    const js = r.body || {};
+    // mostrar modal con PIN
+    const pinEl = document.getElementById('pinValue');
+    const modalEl = document.getElementById('pinModal');
+    const guardPinResultEl = document.getElementById('guardPinResult');
 
-    document.getElementById('btnCopyPin').onclick = () => {
-      navigator.clipboard.writeText(js.tempPin || "");
-      alert('PIN copiado');
-    };
-    document.getElementById('btnClosePin').onclick = () => {
-      document.getElementById('pinModal').style.display = 'none';
-    };
+    if (pinEl) pinEl.textContent = js.tempPin || '—';
+    else console.warn('pinValue element not found in DOM');
+
+    if (modalEl) modalEl.style.display = 'flex';
+    else console.warn('pinModal element not found in DOM');
+
+    if (guardPinResultEl) guardPinResultEl.innerHTML = `<div class="alert alert-success p-2">PIN generado. Se mostró en modal — cópialo ahora.</div>`;
+
+    const btnCopy = document.getElementById('btnCopyPin');
+    if (btnCopy) {
+      btnCopy.onclick = () => {
+        try { navigator.clipboard.writeText(js.tempPin || ""); alert('PIN copiado'); }
+        catch(e){ alert('No se pudo copiar automáticamente. Copia manualmente: ' + (js.tempPin||'')); }
+      };
+    } else {
+      console.warn('btnCopyPin not found');
+    }
+
+    const btnClose = document.getElementById('btnClosePin');
+    if (btnClose && modalEl) {
+      btnClose.onclick = () => { modalEl.style.display = 'none'; };
+    }
+
+    // opcional: cerrar modal automáticamente en 45s para no dejar PIN visible
+    setTimeout(() => {
+      try { if (modalEl) modalEl.style.display = 'none'; } catch (e) {}
+    }, 45000);
+
   } catch (e) {
-    console.error(e);
+    console.error('reset-pin error', e);
     toast('Error de red', 'danger');
+  } finally {
+    btn.disabled = false;
   }
 });
 
@@ -685,5 +789,8 @@ window.addEventListener('load', async () => {
   await refreshShiftsView();
 })();
 </script>
+
+
+
 </body>
 </html>

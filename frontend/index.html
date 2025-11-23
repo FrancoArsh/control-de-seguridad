@@ -125,179 +125,161 @@
           <div id="subText" class="small-muted">sin actividad</div>
         </div>
       </div>
-
-      <hr>
-      <div class="small-muted">Si usas otra máquina, actualiza <code>BACKEND_URL</code>.</div>
     </div>
   </div>
 
 <script>
 document.addEventListener("DOMContentLoaded", () => {
-  console.log("DOM cargado — index.js init");
+  console.log("DOM cargado — index.js init");
 
-  const BACKEND_URL = "control-de-seguridad-production.up.railway.app";
-  const SCAN_DEBOUNCE_MS = 1200;
-  let lastScan = 0;
-  let processing = false;
+  const BACKEND_URL = "http://localhost:3000";
+  const SCAN_DEBOUNCE_MS = 1200;
+  let lastScan = 0;
+  let processing = false;
 
-  const statusEl = document.getElementById('status');
-  const statusText = document.getElementById('statusText');
-  const subText = document.getElementById('subText');
-  const ledEl = document.getElementById('led');
-  const readerEl = document.getElementById('reader');
+  const statusEl = document.getElementById('status');
+  const statusText = document.getElementById('statusText');
+  const subText = document.getElementById('subText');
+  const ledEl = document.getElementById('led');
+  const readerEl = document.getElementById('reader');
 
-  function setStatus(kind, main, sub='') {
-    statusEl.className = 'alert';
-    statusEl.classList.add(
-      kind === 'success' ? 'alert-success' :
-      kind === 'error'   ? 'alert-danger'  :
-      kind === 'warning' ? 'alert-warning' : 'alert-secondary'
-    );
-    statusEl.innerText = main;
-    statusText.innerText = "Estado: " + main;
-    subText.innerText = sub;
-  }
+  function setStatus(kind, main, sub='') {
+    statusEl.className = 'alert';
+    statusEl.classList.add(
+      kind === 'success' ? 'alert-success' :
+      kind === 'error'   ? 'alert-danger'  :
+      kind === 'warning' ? 'alert-warning' : 'alert-secondary'
+    );
+    statusEl.innerText = main;
+    statusText.innerText = "Estado: " + main;
+    subText.innerText = sub;
+  }
 
-  function setLed(color) {
-    ledEl.classList.remove('green','red','off');
-    ledEl.classList.add(color || 'off');
-  }
+  function setLed(color) {
+    ledEl.classList.remove('green','red','off');
+    ledEl.classList.add(color || 'off');
+  }
 
-  function parseQrPayload(txt) {
-    try {
-      const o = JSON.parse(txt);
-      if (o.id && o.token) return { id:o.id, token:o.token };
-    } catch {}
-    return { token: txt };
-  }
+  function parseQrPayload(txt) {
+    try {
+      const o = JSON.parse(txt);
+      if (o.id && o.token) return { id:o.id, token:o.token };
+    } catch {}
+    return { token: txt };
+  }
 
-  async function sendToBackend(payload) {
-    try {
-      const resp = await fetch(`${BACKEND_URL}/verify`, {
-        method:"POST",
-        headers:{ "Content-Type":"application/json" },
-        body:JSON.stringify(payload),
-      });
-      return resp.json();
-    } catch {
-      return { authorized:false, message:"Error de conexión" };
-    }
-  }
+  async function sendToBackend(payload) {
+    try {
+      const resp = await fetch(`${BACKEND_URL}/validate`, {
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body:JSON.stringify(payload),
+      });
+      
+      const data = await resp.json();
+      data.status = resp.status;
+      return data;
 
-  async function processScanned(decodedText) {
-    const now = Date.now();
-    if (processing || now - lastScan < SCAN_DEBOUNCE_MS) return;
-    processing = true;
-    lastScan = now;
+    } catch (e) {
+      console.error("Error de conexión:", e);
+      return { ok: false, error: "Error de conexión con el servidor.", reason: "NETWORK_ERROR", status: 503 };
+    }
+  }
 
-    setStatus("warning","Validando...","Conectando al servidor");
+  async function processScanned(decodedText) {
+    const now = Date.now();
+    if (processing || now - lastScan < SCAN_DEBOUNCE_MS) return;
+    processing = true;
+    lastScan = now;
 
-    const payload = parseQrPayload(decodedText);
-    const res = await sendToBackend(payload);
+    setStatus("warning","Validando...","Conectando al servidor");
 
-    if (res.authorized === true || res.authorized === "true") {
-      setStatus("success","✔ Acceso autorizado", res.message || "");
-      setLed("green");
-    } else {
-      setStatus("error","✖ Acceso denegado", res.message || "");
-      setLed("red");
-    }
+    const payload = parseQrPayload(decodedText);
+    const res = await sendToBackend(payload);
+    
+    let mainMessage = "✖ Acceso denegado";
+    let subMessage = res.error || "Error desconocido del servidor.";
+    let statusKind = "error";
 
-    processing = false;
-  }
+    if (res.ok === true) {
+      mainMessage = "✔ Acceso autorizado";
+      subMessage = res.message || "Bienvenido/a!";
+      statusKind = "success";
+    } else {
+      if (res.reason === "COOLDOWN_ACTIVE") {
+        subMessage = res.error; 
+      } else if (res.reason === "token not found") {
+        subMessage = "QR no válido o no registrado.";
+      } else if (res.reason === "token already used") {
+        subMessage = "Este QR ha sido marcado como de un solo uso.";
+      } else if (res.reason === "token expired") {
+        subMessage = "El código QR ha expirado. Por favor, regenéralo.";
+      } else if (res.reason === "NETWORK_ERROR") {
+          subMessage = res.error;
+      }
+    }
 
-  (async () => {
-    // elemento donde va el lector
-    const readerEl = document.getElementById('reader');
+    setStatus(statusKind, mainMessage, subMessage);
+    setLed(statusKind === "success" ? "green" : "red");
 
-    if (!window.Html5Qrcode) {
-      readerEl.innerHTML = "<div class='small-muted'>Escáner no disponible (librería no cargada)</div>";
-      return;
-    }
+    processing = false;
+  }
 
-    // Helper para mostrar mensajes en UI
-    function showReaderMsg(msg, cls = 'small-muted') {
-      try {
-        readerEl.innerHTML = `<div class="${cls}">${msg}</div>`;
-      } catch(e){ console.warn('showReaderMsg failed', e); }
-    }
+  (async () => {
+    // elemento donde va el lector
+    const readerEl = document.getElementById('reader');
 
-    try {
-      const cams = await Html5Qrcode.getCameras().catch(e => { console.warn('getCameras failed', e); return []; });
-      console.log('Cameras list:', cams);
+    if (!window.Html5Qrcode) {
+      readerEl.innerHTML = "<div class='small-muted'>Escáner no disponible (librería no cargada)</div>";
+      return;
+    }
 
-      if (!cams || !cams.length) {
-        // Fallback: intenta iniciar por facingMode (env)
-        showReaderMsg('No se detectaron cámaras por ID; intentando cámara trasera...', 'small-muted');
-        const qr = new Html5Qrcode("reader");
-        try {
-          await qr.start({ facingMode: { exact: "environment" } }, { fps: 10, qrbox: { width: 300, height: 300 } },
-            txt => processScanned(txt),
-            err => { /* opcional: console.warn(err) */ }
-          );
-          console.log('Scanner started with facingMode environment');
-          return;
-        } catch (errFacing) {
-          // Probemos sin "exact" (más tolerante)
-          try {
-            await qr.start({ facingMode: "environment" }, { fps: 10, qrbox: { width: 300, height: 300 } },
-              txt => processScanned(txt),
-              err => {}
-            );
-            console.log('Scanner started with facingMode (non-exact)');
-            return;
-          } catch (err2) {
-            console.error('No se pudo iniciar la cámara con facingMode', errFacing, err2);
-            showReaderMsg('No fue posible iniciar la cámara en este dispositivo.', 'small-muted');
-            return;
-          }
-        }
-      }
+    // Helper para mostrar mensajes en UI
+    function showReaderMsg(msg, cls = 'small-muted') {
+      try {
+        readerEl.innerHTML = `<div class="${cls}">${msg}</div>`;
+      } catch(e){ console.warn('showReaderMsg failed', e); }
+    }
 
-      // Si hay cámaras listadas, intenta arrancar con la mejor disponible
-      const qr = new Html5Qrcode("reader");
-      let started = false;
-      for (let i = 0; i < cams.length && !started; i++) {
-        const cam = cams[i];
-        try {
-          console.log('Intentando cámara', i, cam);
-          await qr.start(cam.id, { fps: 10, qrbox: { width: 300, height: 300 } },
-            txt => processScanned(txt),
-            err => {}
-          );
-          started = true;
-          console.log('Scanner started with camera id', cam.id);
-          break;
-        } catch (err) {
-          console.warn('Fallo al iniciar cámara', cam.id, err);
-          // intenta siguiente cámara
-        }
-      }
+    const qr = new Html5Qrcode("reader");
+    // Configuración base del escáner
+    const config = { fps: 10, qrbox: { width: 300, height: 300 } };
+    let started = false;
 
-      if (!started) {
-        // último recurso: facingMode
-        try {
-          await qr.start({ facingMode: "environment" }, { fps: 10, qrbox: { width: 300, height: 300 } },
-            txt => processScanned(txt),
-            err => {}
-          );
-          console.log('Scanner started with facingMode fallback');
-        } catch (err) {
-          console.error('No se pudo iniciar el scanner con ningún método', err);
-          showReaderMsg('No fue posible iniciar la cámara. Revisa permisos o prueba otro navegador.', 'small-muted');
-        }
-      }
+    try {
+      // 1. Obtener lista de cámaras
+      const cams = await Html5Qrcode.getCameras().catch(e => {
+        console.warn('getCameras failed:', e);
+        return [];
+      });
+      
+      console.log('Cameras detected:', cams.length);
+      showReaderMsg(`Cámaras detectadas: ${cams.length}. Intentando iniciar...`, 'small-muted');
 
-    } catch (err) {
-      console.error('Error al iniciar scanner:', err);
-      readerEl.innerHTML = "<div class='small-muted'>Error inicializando el escáner — revisa la consola.</div>";
-    }
-  })();
+      if (cams && cams.length > 0) {
+        // 2. Intentar iniciar con el ID de la primera cámara (lo más robusto para USB en desktop)
+        const camId = cams[0].id;
+        console.log('Attempting to start with first camera ID:', camId);
+        await qr.start(camId, config,
+          txt => processScanned(txt),
+          err => { /* ignore minor errors */ }
+        );
+        started = true;
+      }
 
-});
-  // Inicialización del scanner (ya no duplicada)
-  
+if (!started) {
+    console.log('Attempting facingMode "user" fallback.');
+    await qr.start({ facingMode: "user" }, config, txt => processScanned(txt), err => { /* ignore */ });
+    started = true;
+}
+
+    } catch (err) {
+      console.error('Error al iniciar scanner:', err);
+      showReaderMsg('Error al iniciar la cámara. Revisa permisos o prueba otro navegador.', 'small-muted');
+    }
+  })();
+
+}); // ¡Este es el cierre correcto del DOMContentLoaded listener!
 </script>
-
 </body>
 </html>

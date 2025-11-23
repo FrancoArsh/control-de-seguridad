@@ -123,12 +123,6 @@
         <hr class="my-3">
 
         <div class="muted-note">
-          <ul>
-            <li>El guard debe existir en Firebase con <code>pinHash</code>.</li>
-            <li>No expongas ADMIN_SECRET en frontend.</li>
-            <li>Usa <code>/guards/create</code> para registrar guardias.</li>
-          </ul>
-        </div>
 
       </div>
     </div>
@@ -137,7 +131,7 @@
 </div>
 
 <script>
-  const BACKEND_URL = "control-de-seguridad-production.up.railway.app";
+  const BACKEND_URL = "http://localhost:3000";
   const LOGIN_KEY = "guard_auth_token";
   const LOGIN_GUARD_ID = "guard_auth_guardid";
 
@@ -292,6 +286,33 @@
       el.innerHTML = `<span class="muted-note small">Error cargando última acción</span>`;
     }
   }
+
+async function showGuardPin(guardId) {
+    if (!guardId) {
+        alert("Error: ID del guardia no disponible.");
+        return;
+    }
+
+    try {
+        // Llamada a la nueva ruta GET del backend
+        const response = await fetch(`${BACKEND_URL}/api/guards/${guardId}/pin`);
+        
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({error: 'Error de red o servidor.'}));
+            throw new Error(errorData.error || 'No se pudo obtener el PIN.');
+        }
+
+        const data = await response.json();
+        const pin = data.pin;
+
+        // Mostrar el PIN
+        alert(`🔑 PIN del Guardia ID ${guardId}:\n\n${pin}`);
+
+    } catch (error) {
+        console.error('Error al mostrar PIN:', error);
+        alert(`Error al obtener PIN: ${error.message}`);
+    }
+}
 
   /* ------------ iniciar turno ----------- */
   async function startShift(){

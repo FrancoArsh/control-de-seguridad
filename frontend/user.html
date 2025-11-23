@@ -50,7 +50,6 @@
         </div>
 
         <hr />
-        <div class="muted small mt-2">Si no aparece información, verifica que el ID exista en Firebase o que el token esté asignado.</div>
 
         <hr />
         <div>
@@ -64,7 +63,7 @@
   </div>
 
 <script>
-  const BACKEND_URL = "control-de-seguridad-production.up.railway.app";
+  const BACKEND_URL = "http://localhost:3000";
   const params = new URLSearchParams(location.search);
   let userId = params.get('id');
 
