@@ -707,55 +707,63 @@ app.delete("/users/:id",requireFirebaseAdmin, async (req, res) => {
 // --- GUARD AUTH / LOGIN (mejorado, reemplaza tu versión actual) ---
 app.post('/guard/login', async (req, res) => {
   try {
-    // si tienes middleware requireFirebaseAdmin para admin, aquí no aplica
-    // leer datos del body
     const guardId = String(req.body.guardId || req.body.id || '').trim();
     const pin = String(req.body.pin || '').trim();
-    if (!guardId || !pin) return res.status(400).json({ ok:false, error:'missing guardId or pin' });
+    if (!guardId || !pin) 
+      return res.status(400).json({ ok:false, error:'missing guardId or pin' });
 
-    // 1) promover temp pins expirados antes de validar (asegúrate de tener esta función)
     await migrateExpiredTempPins();
 
-    // 2) leer el guard desde la BD
     const gSnap = await db.ref(`guards/${guardId}`).once('value');
-    if (!gSnap.exists()) return res.status(404).json({ ok:false, error: 'guard not found' });
+    if (!gSnap.exists()) 
+      return res.status(404).json({ ok:false, error: 'guard not found' });
     const g: any = gSnap.val();
 
-    // 3) validar contra pinHash permanente (si existe)
+    // ----- validar PIN permanente -----
     if (g.pinHash) {
       const okPerm = await bcrypt.compare(pin, String(g.pinHash));
       if (okPerm) {
-        // login ok con PIN permanente
-        return res.json({ ok:true, guardId, method:'permanent' });
+        const token = jwt.sign(
+          { guardId, name: g.name || "" },
+          JWT_SECRET,
+          { expiresIn: "24h" }
+        );
+        return res.json({ ok:true, guardId, method:'permanent', token });
       }
     }
 
-    // 4) validar contra tempPinHash si existe
+    // ----- validar PIN temporal -----
     if (g.tempPinHash) {
       const okTemp = await bcrypt.compare(pin, String(g.tempPinHash));
       if (okTemp) {
         const now = Date.now();
-        const expiresAt = Number(g.tempPinExpiresAt) || 0;
+        const expiresAt = Number(g.tempPinExpiresAt || 0);
 
-        if (expiresAt === 0 || now <= expiresAt) {
-          // tempPin aún válido -> permitir login (sin promover aún)
-          return res.json({ ok:true, guardId, method:'temp-active' });
-        } else {
-          // tempPin coincide pero ya expiró -> promovemos a permanente y aceptamos login (opción B)
-          const updates: Record<string, any> = {};
+        let method = "temp-active";
+
+        // temp expirado -> promover a permanente
+        if (expiresAt !== 0 && now > expiresAt) {
+          const updates: any = {};
           updates[`guards/${guardId}/pinHash`] = g.tempPinHash;
           updates[`guards/${guardId}/pinCreatedAt`] = g.tempPinCreatedAt || now;
           updates[`guards/${guardId}/tempPinHash`] = null;
           updates[`guards/${guardId}/tempPinCreatedAt`] = null;
           updates[`guards/${guardId}/tempPinExpiresAt`] = null;
           await db.ref().update(updates);
-
-          return res.json({ ok:true, guardId, method:'temp-promoted' });
+          method = "temp-promoted";
         }
+
+        const token = jwt.sign(
+          { guardId, name: g.name || "" },
+          JWT_SECRET,
+          { expiresIn: "24h" }
+        );
+
+        return res.json({ ok:true, guardId, method, token });
       }
     }
 
-    // 5) si ninguna coincidencia
+    // credenciales inválidas
     return res.status(401).json({ ok:false, error:'invalid pin' });
 
   } catch (err) {
@@ -763,8 +771,6 @@ app.post('/guard/login', async (req, res) => {
     return res.status(500).json({ ok:false, error:'server error' });
   }
 });
-
-
 
 
 
