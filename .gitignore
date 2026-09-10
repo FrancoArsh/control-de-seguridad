@@ -7,3 +7,8 @@ backend/serviceAccountKey.json
 .DS_Store
 backend/serviceAccountKey.json
 .gitignore/
+backups/
+backend/backups/
+backend/.tmp/
+backend/recovery/
+.docx_work/

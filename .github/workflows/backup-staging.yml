@@ -1,0 +1,41 @@
+name: Daily staging backup
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    env:
+      NODE_ENV: staging
+      FIREBASE_DATABASE_URL: ${{ secrets.STAGING_FIREBASE_DATABASE_URL }}
+      FIREBASE_SERVICE_ACCOUNT: ${{ secrets.STAGING_FIREBASE_SERVICE_ACCOUNT }}
+      JWT_SECRET: ci-placeholder-not-used
+      QR_SECRET: ci-placeholder-not-used
+      ALLOWED_ORIGINS: https://staging.example.inacap.cl
+      BACKUP_OUTPUT_DIR: ./backups
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install dependencies
+        run: npm ci --prefix backend
+      - name: Run redacted backup
+        working-directory: backend
+        run: node scripts/backup-rtdb.mjs --output=./backups --file="rtdb-${GITHUB_RUN_ID}.json"
+      - name: Upload backup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-rtdb-backup-${{ github.run_id }}
+          path: backend/backups
+          retention-days: 30

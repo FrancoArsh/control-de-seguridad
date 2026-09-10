@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Guard — Panel</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="css/app.css">
 
   <style>
     :root{
@@ -96,6 +97,14 @@
 
           <div class="col-md-4">
             <input id="manualNote" class="form-control" placeholder="Nota (opcional)">
+          </div>
+
+          <div class="col-md-4">
+            <select id="manualAccessType" class="form-select">
+              <option value="auto" selected>Movimiento automático</option>
+              <option value="entry">Registrar entrada</option>
+              <option value="exit">Registrar salida</option>
+            </select>
           </div>
 
           <div class="col-12">
@@ -195,7 +204,9 @@
     }
 
     try{
-      const res = await fetch(`${BACKEND_URL}/guardShifts?guardId=${gid}&active=true`);
+      const res = await fetch(`${BACKEND_URL}/guardShifts?guardId=${gid}&active=true`, {
+        headers: authHeaders()
+      });
       const js = await res.json();
 
       if(js.data && js.data.length){
@@ -267,7 +278,9 @@
       let studentNameHtml = "";
       if (last.studentId) {
         try {
-          const ures = await fetch(`${BACKEND_URL}/user/${encodeURIComponent(last.studentId)}`);
+          const ures = await fetch(`${BACKEND_URL}/user/${encodeURIComponent(last.studentId)}`, {
+            headers: authHeaders()
+          });
           if (ures.ok) {
             const ujs = await ures.json();
             if (ujs.ok && ujs.name) studentNameHtml = ` — ${ujs.name}`;
@@ -286,33 +299,6 @@
       el.innerHTML = `<span class="muted-note small">Error cargando última acción</span>`;
     }
   }
-
-async function showGuardPin(guardId) {
-    if (!guardId) {
-        alert("Error: ID del guardia no disponible.");
-        return;
-    }
-
-    try {
-        // Llamada a la nueva ruta GET del backend
-        const response = await fetch(`${BACKEND_URL}/api/guards/${guardId}/pin`);
-        
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({error: 'Error de red o servidor.'}));
-            throw new Error(errorData.error || 'No se pudo obtener el PIN.');
-        }
-
-        const data = await response.json();
-        const pin = data.pin;
-
-        // Mostrar el PIN
-        alert(`🔑 PIN del Guardia ID ${guardId}:\n\n${pin}`);
-
-    } catch (error) {
-        console.error('Error al mostrar PIN:', error);
-        alert(`Error al obtener PIN: ${error.message}`);
-    }
-}
 
   /* ------------ iniciar turno ----------- */
   async function startShift(){
@@ -364,6 +350,7 @@ async function showGuardPin(guardId) {
     const sid = manualStudentId.value.trim();
     const tkn = manualToken.value.trim();
     const note = manualNote.value.trim();
+    const accessType = document.getElementById('manualAccessType').value;
 
     if(!sid && !tkn) return showManualResult("Debes ingresar studentId o token",false);
 
@@ -371,6 +358,7 @@ async function showGuardPin(guardId) {
       studentId: sid || undefined,
       token: tkn || undefined,
       note: note || undefined,
+      type: accessType,
       shiftId: window.__currentShift ? window.__currentShift.id : undefined
     };
 

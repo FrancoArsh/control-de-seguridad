@@ -53,7 +53,7 @@ function ensureAdminSecretConfigured() {
     console.error(
       "\n[ERROR] ADMIN_SECRET no está configurado en las variables de entorno.\n" +
       "Crea backend/.env con ADMIN_SECRET=tu_valor_secreto y reinicia el servidor.\n" +
-      "Ejemplo: ADMIN_SECRET=mi_secreto_super_seguro\n"
+      "Ejemplo: ADMIN_SECRET=usa_un_valor_largo_aleatorio\n"
     );
     process.exit(1);
   }
@@ -66,6 +66,10 @@ function ensureEnv() {
   }
   if (!process.env.JWT_SECRET) {
     console.error("JWT_SECRET no configurado. Agrega en backend/.env");
+    process.exit(1);
+  }
+  if (process.env.NODE_ENV === "production" && !process.env.QR_SECRET) {
+    console.error("QR_SECRET es obligatorio en producción y debe ser distinto de JWT_SECRET.");
     process.exit(1);
   }
 }
@@ -120,8 +124,30 @@ if (serviceAccount) {
 
 const db = admin.database();
 const app = express();
-app.use(express.json());
-app.use(cors());
+const NODE_ENV = process.env.NODE_ENV || "development";
+const IS_PRODUCTION = NODE_ENV === "production";
+const DEFAULT_ALLOWED_ORIGINS = ["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000"];
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
+  .split(",")
+  .map(origin => origin.trim())
+  .filter(Boolean);
+
+app.use(express.json({ limit: "256kb" }));
+app.use((_req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Permissions-Policy", "geolocation=(), microphone=()");
+  next();
+});
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || !IS_PRODUCTION || DEFAULT_ALLOWED_ORIGINS.includes(origin) || ALLOWED_ORIGINS.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error("CORS origin not allowed"));
+  }
+}));
 
 /* --------------------
    Middlewares
@@ -134,6 +160,7 @@ function requireGuard(req: Request, res: Response, next: NextFunction) {
   const token = m[1];
   try {
     const decoded: any = jwt.verify(token, JWT_SECRET);
+    if (!decoded?.guardId) return res.status(401).json({ ok: false, error: "invalid token" });
     (req as any).guard = { id: decoded.guardId, name: decoded.name };
     return next();
   } catch (e) {
@@ -173,8 +200,55 @@ async function requireFirebaseAdmin(req: Request, res: Response, next: NextFunct
   }
 }
 
+async function requireAdminOrGuard(req: Request, res: Response, next: NextFunction) {
+  const authHeader = (req.headers["authorization"] || "") as string;
+  const m = authHeader.match(/^Bearer\s+(.+)$/i);
+  if (!m) return res.status(401).json({ ok: false, error: "no token" });
 
-// MIGRATE: convierte tempPinHash vencidos en pinHash permanentes
+  const token = m[1];
+  try {
+    const decoded: any = jwt.verify(token, JWT_SECRET);
+    if (decoded?.guardId) {
+      (req as any).guard = { id: decoded.guardId, name: decoded.name || null };
+      return next();
+    }
+  } catch (_) {
+    // Puede ser un token Firebase de administrador; se valida abajo.
+  }
+
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    const uid = decoded.uid;
+    const snap = await db.ref(`admins/${uid}`).once("value");
+    if (!snap.exists()) return res.status(403).json({ ok: false, error: "not admin" });
+    const profile = snap.val();
+    if (profile.role !== "admin") return res.status(403).json({ ok: false, error: "not admin role" });
+    (req as any).admin = { uid, name: profile.name || null, email: profile.email || null };
+    return next();
+  } catch (err: any) {
+    const code = err?.errorInfo?.code || "";
+    if (code === "auth/id-token-expired") {
+      return res.status(401).json({ ok: false, error: "id-token-expired" });
+    }
+    return res.status(401).json({ ok: false, error: "invalid token" });
+  }
+}
+
+function adminActor(req: Request) {
+  const adminUser = (req as any).admin;
+  if (adminUser?.uid) return adminUser.uid;
+  return "system";
+}
+
+function safeCompareString(a: string, b: string) {
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+  if (left.length !== right.length) return false;
+  return crypto.timingSafeEqual(left, right);
+}
+
+
+// MIGRATE: invalida tempPinHash vencidos para que no puedan convertirse en credenciales permanentes.
 async function migrateExpiredTempPins() {
   try {
     const now = Date.now();
@@ -186,13 +260,11 @@ async function migrateExpiredTempPins() {
     for (const id of Object.keys(guards)) {
       const g: any = guards[id] || {};
       if (g.tempPinHash && g.tempPinExpiresAt && Number(g.tempPinExpiresAt) <= now) {
-        // mover tempPinHash -> pinHash y limpiar campos temporales
-        updates[`guards/${id}/pinHash`] = g.tempPinHash;
-        updates[`guards/${id}/pinCreatedAt`] = g.tempPinCreatedAt || now;
         updates[`guards/${id}/tempPinHash`] = null;
         updates[`guards/${id}/tempPinCreatedAt`] = null;
         updates[`guards/${id}/tempPinExpiresAt`] = null;
-        console.log(`migrateExpiredTempPins: guard ${id} -> tempPin promoted to permanent`);
+        updates[`guards/${id}/tempPinInvalidatedAt`] = now;
+        console.log(`migrateExpiredTempPins: guard ${id} -> expired temp pin invalidated`);
       }
     }
 
@@ -205,25 +277,225 @@ async function migrateExpiredTempPins() {
 }
 
 
-async function ensureTokenForId(id: string) {
-  const tRef = db.ref(`accessTokens/${id}`);
-  const tSnap = await tRef.once("value");
-  if (tSnap.exists() && tSnap.val().token) {
-    return String(tSnap.val().token);
-  }
-  const newToken = crypto.randomBytes(12).toString("hex");
-  await tRef.set({ token: newToken, createdAt: Date.now() });
-  return newToken;
-}
-
-async function genQrDataUrl(id: string, token: string | null) {
+async function genDynamicQrDataUrl(token: string | null) {
   if (!token) return null;
   try {
-    return await QRCode.toDataURL(JSON.stringify({ id, token }), { margin: 1, scale: 8 });
+    return await QRCode.toDataURL(token, { margin: 1, scale: 8 });
   } catch (e) {
-    console.warn("QR gen failed for", id, e);
+    console.warn("Dynamic QR gen failed", e);
     return null;
   }
+}
+
+const QR_SECRET = process.env.QR_SECRET || JWT_SECRET;
+if (!process.env.QR_SECRET) {
+  console.warn("[SECURITY] QR_SECRET no está definido; se usará JWT_SECRET solo para desarrollo local.");
+}
+if (IS_PRODUCTION && QR_SECRET === JWT_SECRET) {
+  console.error("[SECURITY] QR_SECRET debe ser independiente de JWT_SECRET en producción.");
+  process.exit(1);
+}
+const configuredQrTtl = Number(process.env.QR_TTL_MS || 60 * 1000);
+const QR_TTL_MS = Number.isFinite(configuredQrTtl) && configuredQrTtl >= 10_000 && configuredQrTtl <= 5 * 60 * 1000
+  ? configuredQrTtl
+  : 60 * 1000;
+
+type AccessType = "entry" | "exit";
+const ACCESS_COOLDOWN_MS = 15000;
+
+type DynamicQrPayload = {
+  v: 2;
+  purpose: "access";
+  sub: string;
+  iat: number;
+  exp: number;
+  nonce: string;
+};
+
+function signQrPayload(payload: DynamicQrPayload) {
+  const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  const signature = crypto.createHmac("sha256", QR_SECRET).update(encoded).digest("base64url");
+  return `${encoded}.${signature}`;
+}
+
+function createDynamicQrToken(id: string) {
+  const now = Date.now();
+  const payload: DynamicQrPayload = {
+    v: 2,
+    purpose: "access",
+    sub: id,
+    iat: now,
+    exp: now + QR_TTL_MS,
+    nonce: crypto.randomBytes(16).toString("hex")
+  };
+  return { payload, token: signQrPayload(payload) };
+}
+
+function verifyDynamicQrToken(token: string): { ok: true; payload: DynamicQrPayload } | { ok: false; reason: string } {
+  const parts = token.split(".");
+  if (parts.length !== 2) return { ok: false, reason: "invalid qr format" };
+
+  const [encoded, signature] = parts;
+  const expectedSignature = crypto.createHmac("sha256", QR_SECRET).update(encoded).digest("base64url");
+  if (!safeCompareString(signature, expectedSignature)) {
+    return { ok: false, reason: "invalid qr signature" };
+  }
+
+  try {
+    const payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as DynamicQrPayload;
+    const issuedAt = Number(payload.iat);
+    const expiresAt = Number(payload.exp);
+    if (
+      payload.v !== 2 ||
+      payload.purpose !== "access" ||
+      typeof payload.sub !== "string" ||
+      payload.sub.length > 160 ||
+      typeof payload.nonce !== "string" ||
+      payload.nonce.length < 16 ||
+      !Number.isFinite(issuedAt) ||
+      !Number.isFinite(expiresAt) ||
+      expiresAt <= issuedAt
+    ) {
+      return { ok: false, reason: "invalid qr payload" };
+    }
+    if (Date.now() > expiresAt) {
+      return { ok: false, reason: "qr expired" };
+    }
+    return { ok: true, payload };
+  } catch (_) {
+    return { ok: false, reason: "invalid qr payload" };
+  }
+}
+
+async function markDynamicQrNonceUsed(payload: DynamicQrPayload) {
+  const nonceRef = db.ref(`dynamicQrNonces/${payload.nonce}`);
+  const result = await nonceRef.transaction((current) => {
+    if (current) return;
+    return {
+      userId: payload.sub,
+      issuedAt: payload.iat,
+      expiresAt: payload.exp,
+      usedAt: Date.now()
+    };
+  });
+  return result.committed === true;
+}
+
+async function cleanupExpiredQrNonces() {
+  try {
+    const now = Date.now();
+    const snap = await db.ref("dynamicQrNonces")
+      .orderByChild("expiresAt")
+      .endAt(now)
+      .limitToFirst(500)
+      .once("value");
+    const expired = snap.val() || {};
+    const updates: Record<string, null> = {};
+    for (const nonce of Object.keys(expired)) {
+      updates[`dynamicQrNonces/${nonce}`] = null;
+    }
+    if (Object.keys(updates).length) {
+      await db.ref().update(updates);
+      console.log(`[MAINTENANCE] Removed ${Object.keys(updates).length} expired QR nonces.`);
+    }
+  } catch (err) {
+    console.error("cleanupExpiredQrNonces error:", err);
+  }
+}
+
+const QR_NONCE_CLEANUP_INTERVAL_MS = Math.max(
+  60_000,
+  Number(process.env.QR_NONCE_CLEANUP_INTERVAL_MS || 5 * 60 * 1000)
+);
+const qrNonceCleanupTimer = setInterval(() => {
+  void cleanupExpiredQrNonces();
+}, QR_NONCE_CLEANUP_INTERVAL_MS);
+qrNonceCleanupTimer.unref?.();
+void cleanupExpiredQrNonces();
+
+async function resolveStaticAccessToken(token: string) {
+  let tokenNodeSnap = await db.ref('accessTokens').orderByChild('token').equalTo(token).once('value');
+  let foundKey: string | null = null;
+  let tokenData: any = null;
+
+  if (tokenNodeSnap.exists()) {
+    const val = tokenNodeSnap.val();
+    const keys = Object.keys(val);
+    foundKey = keys[0];
+    tokenData = val[foundKey];
+  } else {
+    const altSnap = await db.ref('tokens').orderByChild('token').equalTo(token).once('value');
+    if (altSnap.exists()) {
+      const v = altSnap.val();
+      const keys2 = Object.keys(v);
+      foundKey = keys2[0];
+      tokenData = v[foundKey];
+    }
+  }
+
+  return { foundKey, tokenData };
+}
+
+async function commitAccessTransition(userId: string, requestedType: string, sessionId: string): Promise<{
+  ok: true;
+  accessType: AccessType;
+  previousInside: boolean;
+  newInside: boolean;
+} | { ok: false; reason: string }> {
+  const normalized = requestedType === "entry" || requestedType === "exit" ? requestedType : "auto";
+  const stateRef = db.ref(`accessState/${userId}`);
+  let rejectedReason: string | null = null;
+  let acceptedTransition: { accessType: AccessType; previousInside: boolean; newInside: boolean } | null = null;
+  const now = Date.now();
+
+  const result = await stateRef.transaction((current: any) => {
+    const state = current && typeof current === "object" ? current : {};
+    const previousInside = state.inside === true;
+
+    if (now - Number(state.lastTimestamp || 0) < ACCESS_COOLDOWN_MS) {
+      rejectedReason = "cooldown active";
+      return;
+    }
+
+    const accessType: AccessType = normalized === "auto" ? (previousInside ? "exit" : "entry") : normalized;
+    if (accessType === "entry" && previousInside) {
+      rejectedReason = "user already inside";
+      return;
+    }
+    if (accessType === "exit" && !previousInside) {
+      rejectedReason = "user already outside";
+      return;
+    }
+
+    acceptedTransition = {
+      accessType,
+      previousInside,
+      newInside: accessType === "entry"
+    };
+    return {
+      ...state,
+      inside: accessType === "entry",
+      lastAccessType: accessType,
+      lastTimestamp: now,
+      sessionId
+    };
+  });
+
+  const committedTransition: { accessType: AccessType; previousInside: boolean; newInside: boolean } | null = acceptedTransition as {
+    accessType: AccessType;
+    previousInside: boolean;
+    newInside: boolean;
+  } | null;
+  if (!result.committed || committedTransition === null) {
+    return { ok: false, reason: rejectedReason || "access state conflict" };
+  }
+
+  return {
+    ok: true,
+    accessType: committedTransition.accessType,
+    previousInside: committedTransition.previousInside,
+    newInside: committedTransition.newInside
+  };
 }
 
 async function logAccess(params: {
@@ -234,6 +506,11 @@ async function logAccess(params: {
   authorized: boolean;
   reason?: string;
   sessionId?: string;
+  accessType?: AccessType | null;
+  previousInside?: boolean | null;
+  newInside?: boolean | null;
+  validationMode?: "static" | "dynamic" | "manual" | null;
+  qrVersion?: number | null;
 }) {
   try {
     const now = Date.now();
@@ -245,6 +522,11 @@ async function logAccess(params: {
       authorized: !!params.authorized,
       reason: params.reason || null,
       sessionId: params.sessionId || null,
+      accessType: params.accessType || null,
+      previousInside: params.previousInside ?? null,
+      newInside: params.newInside ?? null,
+      validationMode: params.validationMode || null,
+      qrVersion: params.qrVersion || null,
       timestamp: now
     };
     const pushRef = db.ref(`accessHistory`).push();
@@ -256,184 +538,401 @@ async function logAccess(params: {
   }
 }
 
+async function logAdminAction(req: Request, params: {
+  action: string;
+  entityType: string;
+  entityId?: string | null;
+  metadata?: Record<string, any>;
+}) {
+  try {
+    const now = Date.now();
+    await db.ref("adminAuditLog").push({
+      actorId: adminActor(req),
+      actorEmail: (req as any).admin?.email || null,
+      action: params.action,
+      entityType: params.entityType,
+      entityId: params.entityId || null,
+      metadata: params.metadata || {},
+      timestamp: now,
+      ip: req.ip || null,
+      userAgent: req.headers["user-agent"] || null
+    });
+  } catch (err) {
+    console.error("logAdminAction error:", err);
+  }
+}
+
+function sanitizeLimit(raw: any, defaultValue = 200, maxValue = 1000) {
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return defaultValue;
+  return Math.min(Math.floor(parsed), maxValue);
+}
+
+async function logSecurityEvent(params: {
+  type: string;
+  subjectId?: string | null;
+  outcome: "success" | "failure" | "blocked";
+  reason?: string | null;
+  ip?: string | null;
+}) {
+  try {
+    await db.ref("securityEvents").push({
+      type: params.type,
+      subjectId: params.subjectId || null,
+      outcome: params.outcome,
+      reason: params.reason || null,
+      ip: params.ip || null,
+      timestamp: Date.now()
+    });
+  } catch (err) {
+    console.error("logSecurityEvent error:", err);
+  }
+}
+
+const guardLoginAttempts = new Map<string, { count: number; lockedUntil: number }>();
+const GUARD_LOGIN_MAX_ATTEMPTS = Number(process.env.GUARD_LOGIN_MAX_ATTEMPTS || 5);
+const GUARD_LOGIN_LOCK_MS = Number(process.env.GUARD_LOGIN_LOCK_MS || 5 * 60 * 1000);
+
+function guardLoginKey(req: Request, guardId: string) {
+  return `${guardId}:${req.ip || "unknown"}`;
+}
+
+function isGuardLoginLocked(req: Request, guardId: string) {
+  const current = guardLoginAttempts.get(guardLoginKey(req, guardId));
+  return !!current && current.lockedUntil > Date.now();
+}
+
+function recordGuardLoginFailure(req: Request, guardId: string) {
+  const key = guardLoginKey(req, guardId);
+  const current = guardLoginAttempts.get(key) || { count: 0, lockedUntil: 0 };
+  const nextCount = current.lockedUntil > Date.now() ? current.count : current.count + 1;
+  guardLoginAttempts.set(key, {
+    count: nextCount,
+    lockedUntil: nextCount >= GUARD_LOGIN_MAX_ATTEMPTS ? Date.now() + GUARD_LOGIN_LOCK_MS : current.lockedUntil
+  });
+}
+
+function clearGuardLoginFailures(req: Request, guardId: string) {
+  guardLoginAttempts.delete(guardLoginKey(req, guardId));
+}
+
 /* --------------------
    Endpoints: Validate / Verify / History / User
    -------------------- */
 
-const ACCESS_COOLDOWN_MS = 15000; 
+app.get("/health", (_req, res) => {
+  return res.json({
+    ok: true,
+    service: "control-de-seguridad-api",
+    status: "operational",
+    timestamp: Date.now(),
+    environment: NODE_ENV
+  });
+});
+
+async function getCurrentPresence() {
+  const [stateSnap, studentsSnap] = await Promise.all([
+    db.ref("accessState").once("value"),
+    db.ref("students").once("value")
+  ]);
+  const states = stateSnap.val() || {};
+  const students = studentsSnap.val() || {};
+
+  return Object.keys(states)
+    .filter(id => states[id]?.inside === true)
+    .map(id => ({
+      id,
+      name: students[id]?.name || "Usuario sin nombre",
+      role: students[id]?.role || "sin rol",
+      inside: true,
+      lastAccessType: states[id]?.lastAccessType || "entry",
+      lastTimestamp: Number(states[id]?.lastTimestamp || 0),
+      sessionId: states[id]?.sessionId || "default"
+    }))
+    .sort((a, b) => b.lastTimestamp - a.lastTimestamp);
+}
+
+app.get("/presence", requireAdminOrGuard, async (req, res) => {
+  try {
+    const data = await getCurrentPresence();
+    if ((req as any).admin) {
+      await logAdminAction(req, {
+        action: "presence.read",
+        entityType: "access_state",
+        metadata: { count: data.length }
+      });
+    }
+    return res.json({ ok: true, generatedAt: Date.now(), count: data.length, data });
+  } catch (err) {
+    console.error("GET /presence error:", err);
+    return res.status(500).json({ ok: false, error: "server error" });
+  }
+});
+
+app.get("/admin/metrics", requireFirebaseAdmin, async (req, res) => {
+  try {
+    const now = Date.now();
+    const dayStart = now - 24 * 60 * 60 * 1000;
+    const weekStart = now - 7 * 24 * 60 * 60 * 1000;
+
+    const [historySnap, shiftsSnap, usersSnap, guardsSnap, presence] = await Promise.all([
+      db.ref("accessHistory").orderByChild("timestamp").startAt(weekStart).once("value"),
+      db.ref("guardShifts").once("value"),
+      db.ref("students").once("value"),
+      db.ref("guards").once("value"),
+      getCurrentPresence()
+    ]);
+
+    const historyVal = historySnap.val() || {};
+    const rows = Object.keys(historyVal).map(k => ({ id: k, ...(historyVal[k] || {}) }));
+    const last24 = rows.filter((r: any) => Number(r.timestamp || 0) >= dayStart);
+    const authorized24 = last24.filter((r: any) => r.authorized === true);
+    const rejected24 = last24.filter((r: any) => r.authorized === false);
+    const manualOverrides24 = last24.filter((r: any) => r.reason === "manual_override");
+    const shiftsVal = shiftsSnap.val() || {};
+    const shifts = Object.keys(shiftsVal).map(k => ({ id: k, ...(shiftsVal[k] || {}) }));
+    const activeShifts = shifts.filter((s: any) => !s.endTimestamp && s.active !== false);
+
+    const usersVal = usersSnap.val() || {};
+    const guardsVal = guardsSnap.val() || {};
+
+    await logAdminAction(req, {
+      action: "metrics.read",
+      entityType: "operational_dashboard",
+      metadata: { windowHours: 24 }
+    });
+
+    return res.json({
+      ok: true,
+      generatedAt: now,
+      window: { last24HoursStart: dayStart, last7DaysStart: weekStart },
+      kpis: {
+        accessEvents24h: last24.length,
+        authorizedAccesses24h: authorized24.length,
+        rejectedAccesses24h: rejected24.length,
+        rejectionRate24h: last24.length ? Number((rejected24.length / last24.length).toFixed(4)) : 0,
+        manualOverrides24h: manualOverrides24.length,
+        peopleCurrentlyInside: presence.length,
+        activeGuardShifts: activeShifts.length,
+        registeredUsers: Object.keys(usersVal).length,
+        registeredGuards: Object.keys(guardsVal).length
+      }
+    });
+  } catch (err) {
+    console.error("GET /admin/metrics error:", err);
+    return res.status(500).json({ ok: false, error: "server error" });
+  }
+});
+
+app.get("/admin/audit-log", requireFirebaseAdmin, async (_req, res) => {
+  try {
+    const limit = sanitizeLimit(_req.query.limit, 100, 500);
+    const snap = await db.ref("adminAuditLog").orderByChild("timestamp").limitToLast(limit).once("value");
+    const val = snap.val() || {};
+    const data = Object.keys(val)
+      .map(k => ({ id: k, ...(val[k] || {}) }))
+      .sort((a: any, b: any) => Number(b.timestamp || 0) - Number(a.timestamp || 0));
+
+    return res.json({ ok: true, count: data.length, data });
+  } catch (err) {
+    console.error("GET /admin/audit-log error:", err);
+    return res.status(500).json({ ok: false, error: "server error" });
+  }
+});
 
 // POST /validate
 app.post("/validate", async (req, res) => {
-  const tokenId = String(req.body?.token || "").trim();
-  const sessionId = String(req.body?.sessionId || "default");
-  const type = String(req.body?.type || "entry");
-  const now = Date.now();
+  const rawToken = String(req.body?.qr || req.body?.qrToken || req.body?.token || "").trim();
+  const sessionId = String(req.body?.sessionId || "default").trim() || "default";
+  const requestedType = String(req.body?.type || "auto").trim().toLowerCase();
+  const now = Date.now();
 
-  if (!tokenId) {
-    await logAccess({ token: tokenId, authorized: false, reason: "token required", sessionId });
-    return res.status(400).json({ ok: false, error: "token required" });
-  }
+  if (!rawToken) {
+    await logAccess({ token: rawToken, authorized: false, reason: "token required", sessionId });
+    return res.status(400).json({ ok: false, error: "token required" });
+  }
 
-  try {
-    let tokenNodeSnap = await db.ref('accessTokens').orderByChild('token').equalTo(tokenId).once('value');
-    let foundKey: string | null = null;
-    let tokenData: any = null;
+  try {
+    let foundKey: string | null = null;
+    let tokenData: any = null;
+    let validationMode: "static" | "dynamic" = "static";
+    let qrVersion = 1;
+    let dynamicPayload: DynamicQrPayload | null = null;
 
-    if (tokenNodeSnap.exists()) {
-      const val = tokenNodeSnap.val();
-      const keys = Object.keys(val);
-      foundKey = keys[0];
-      tokenData = val[foundKey];
-    } else {
-      const altSnap = await db.ref('tokens').orderByChild('token').equalTo(tokenId).once('value');
-      if (altSnap.exists()) {
-        const v = altSnap.val();
-        const keys2 = Object.keys(v);
-        foundKey = keys2[0];
-        tokenData = v[foundKey];
-      }
-    }
-
-    if (!foundKey || !tokenData) {
-      await logAccess({ token: tokenId, authorized: false, reason: "token not found", sessionId });
-      return res.status(404).json({ ok: false, error: "token not found" });
-    }
-    
-    // --- NUEVA LÓGICA DE COOLDOWN ---
-    let studentName = null;
-    let studentSnap = await db.ref(`students/${foundKey}`).once("value");
-    let lastAccessTimestamp = 0;
-    
-    if (studentSnap.exists()) {
-        const studentVal = studentSnap.val();
-        studentName = studentVal.name || null;
-        lastAccessTimestamp = studentVal.lastAccessTimestamp || 0;
+    const dynamicQr = verifyDynamicQrToken(rawToken);
+    if (dynamicQr.ok) {
+      foundKey = dynamicQr.payload.sub;
+      dynamicPayload = dynamicQr.payload;
+      validationMode = "dynamic";
+      qrVersion = 2;
+    } else if (rawToken.includes(".")) {
+      await logAccess({
+        token: rawToken,
+        authorized: false,
+        reason: dynamicQr.reason,
+        sessionId,
+        validationMode: "dynamic",
+        qrVersion: 2
+      });
+      return res.status(400).json({ ok: false, error: dynamicQr.reason, reason: dynamicQr.reason });
+    } else {
+      const resolved = await resolveStaticAccessToken(rawToken);
+      foundKey = resolved.foundKey;
+      tokenData = resolved.tokenData;
     }
-    
+
+    if (!foundKey) {
+      await logAccess({ token: rawToken, authorized: false, reason: "token not found", sessionId, validationMode, qrVersion });
+      return res.status(404).json({ ok: false, error: "token not found", reason: "token not found" });
+    }
+
+    const studentSnap = await db.ref(`students/${foundKey}`).once("value");
+    if (!studentSnap.exists()) {
+      await logAccess({ id: foundKey, studentUid: foundKey, token: rawToken, authorized: false, reason: "user not found", sessionId, validationMode, qrVersion });
+      return res.status(404).json({ ok: false, error: "user not found", reason: "user not found" });
+    }
+
+    const studentVal = studentSnap.val();
+    const studentName = studentVal.name || null;
+    const lastAccessTimestamp = Number(studentVal.lastAccessTimestamp || 0);
+
     if (now - lastAccessTimestamp < ACCESS_COOLDOWN_MS) {
-        const remainingMs = ACCESS_COOLDOWN_MS - (now - lastAccessTimestamp);
-        const remainingSec = Math.ceil(remainingMs / 1000);
-        
-        await logAccess({ 
-            id: foundKey, 
-            studentUid: foundKey, 
-            name: studentName, 
-            token: tokenId, 
-            authorized: false, 
-            reason: "cooldown active", 
-            sessionId 
-        });
-        
-        // Mensaje de error personalizado para el frontend (el mensaje de seguridad requerido)
-        return res.status(403).json({ 
-            ok: false, 
-            error: `Acceso denegado. Este QR fue usado recientemente. Espere ${remainingSec} segundos.`,
-            reason: "COOLDOWN_ACTIVE" 
-        });
+      const remainingMs = ACCESS_COOLDOWN_MS - (now - lastAccessTimestamp);
+      const remainingSec = Math.ceil(remainingMs / 1000);
+
+      await logAccess({
+        id: foundKey,
+        studentUid: foundKey,
+        name: studentName,
+        token: rawToken,
+        authorized: false,
+        reason: "cooldown active",
+        sessionId,
+        validationMode,
+        qrVersion
+      });
+
+      return res.status(403).json({
+        ok: false,
+        error: `Acceso denegado. Este QR fue usado recientemente. Espere ${remainingSec} segundos.`,
+        reason: "COOLDOWN_ACTIVE"
+      });
     }
-    // ---------------------------------
-    
 
-    if (tokenData.used) {
-      await logAccess({ id: foundKey, studentUid: foundKey, token: tokenId, authorized: false, reason: "token already used", sessionId });
-      return res.status(400).json({ ok: false, error: "token already used" });
-    }
-    if (tokenData.expiresAt && now > Number(tokenData.expiresAt)) {
-      await logAccess({ id: foundKey, studentUid: foundKey, token: tokenId, authorized: false, reason: "token expired", sessionId });
-      return res.status(400).json({ ok: false, error: "token expired" });
-    }
+    if (validationMode === "static") {
+      if (tokenData?.used) {
+        await logAccess({ id: foundKey, studentUid: foundKey, token: rawToken, authorized: false, reason: "token already used", sessionId, validationMode, qrVersion });
+        return res.status(400).json({ ok: false, error: "token already used", reason: "token already used" });
+      }
+      if (tokenData?.expiresAt && now > Number(tokenData.expiresAt)) {
+        await logAccess({ id: foundKey, studentUid: foundKey, token: rawToken, authorized: false, reason: "token expired", sessionId, validationMode, qrVersion });
+        return res.status(400).json({ ok: false, error: "token expired", reason: "token expired" });
+      }
+    }
 
-    // Paso Crítico: Actualizar el Timestamp de Último Acceso
+    const transition = await commitAccessTransition(foundKey, requestedType, sessionId);
+    if (!transition.ok) {
+      await logAccess({
+        id: foundKey,
+        studentUid: foundKey,
+        name: studentName,
+        token: rawToken,
+        authorized: false,
+        reason: transition.reason,
+        sessionId,
+        validationMode,
+        qrVersion
+      });
+      if (transition.reason === "cooldown active") {
+        return res.status(403).json({ ok: false, error: "Acceso denegado por cooldown operativo.", reason: "COOLDOWN_ACTIVE" });
+      }
+      return res.status(409).json({ ok: false, error: transition.reason, reason: transition.reason });
+    }
+
+    if (dynamicPayload) {
+      const nonceAccepted = await markDynamicQrNonceUsed(dynamicPayload);
+      if (!nonceAccepted) {
+        await logAccess({
+          id: foundKey,
+          studentUid: foundKey,
+          name: studentName,
+          token: rawToken,
+          authorized: false,
+          reason: "qr already used",
+          sessionId,
+          validationMode,
+          qrVersion
+        });
+        return res.status(409).json({ ok: false, error: "qr already used", reason: "qr already used" });
+      }
+    }
+
     await db.ref(`students/${foundKey}`).update({
-        lastAccessTimestamp: now
+      lastAccessTimestamp: now,
+      lastAccessType: transition.accessType
     });
-    
-    // Registrar attendance
-    try {
-      const attendanceRef = db.ref(`attendance/${sessionId}/${foundKey}`).push();
-      await attendanceRef.set({ type, timestamp: now, tokenId });
-    } catch (e) {
-      console.warn("No se pudo registrar attendance:", e);
-    }
-
-    // Log accessHistory
-    // Si no lo obtuvimos antes (solo para el log)
-    if (!studentName) {
-      try {
-        const studentSnap = await db.ref(`students/${foundKey}`).once("value");
-        if (studentSnap.exists()) studentName = studentSnap.val().name || null;
-      } catch (e) { /* ignore */ }
+    try {
+      const attendanceRef = db.ref(`attendance/${sessionId}/${foundKey}`).push();
+      await attendanceRef.set({
+        type: transition.accessType,
+        timestamp: now,
+        tokenId: validationMode === "static" ? rawToken : null,
+        qrVersion,
+        validationMode,
+        previousInside: transition.previousInside,
+        newInside: transition.newInside
+      });
+    } catch (e) {
+      console.warn("No se pudo registrar attendance:", e);
     }
 
-    await logAccess({
-      id: foundKey,
-      studentUid: foundKey,
-      name: studentName,
-      token: tokenId,
-      authorized: true,
-      reason: "ok",
-      sessionId
-    });
+    await logAccess({
+      id: foundKey,
+      studentUid: foundKey,
+      name: studentName,
+      token: rawToken,
+      authorized: true,
+      reason: "ok",
+      sessionId,
+      accessType: transition.accessType,
+      previousInside: transition.previousInside,
+      newInside: transition.newInside,
+      validationMode,
+      qrVersion
+    });
 
-    return res.json({ ok: true, studentUid: foundKey });
+    return res.json({
+      ok: true,
+      studentUid: foundKey,
+      name: studentName,
+      accessType: transition.accessType,
+      inside: transition.newInside,
+      validationMode,
+      qrVersion,
+      message: transition.accessType === "entry" ? "Entrada registrada" : "Salida registrada"
+    });
 
-  } catch (err) {
-    console.error("validate error:", err);
-    await logAccess({ token: tokenId, authorized: false, reason: "server error", sessionId });
-    return res.status(500).json({ ok: false, error: "server error" });
-  }
+  } catch (err) {
+    console.error("validate error:", err);
+    await logAccess({ token: rawToken, authorized: false, reason: "server error", sessionId });
+    return res.status(500).json({ ok: false, error: "server error" });
+  }
 });
 
 // POST /verify
-app.post("/verify", async (req, res) => {
-  try {
-    const { id, token } = req.body;
-
-    if (!id || !token) {
-      await logAccess({ id, token, authorized: false, reason: "missing data" });
-      return res.status(400).json({ authorized: false, message: "Faltan datos: id o token" });
-    }
-
-    const studentRef = db.ref(`accessTokens/${id}`);
-    const snapshot = await studentRef.once("value");
-
-    if (!snapshot.exists()) {
-      await logAccess({ id, token, authorized: false, reason: "ID no encontrado" });
-      return res.status(404).json({ authorized: false, message: "ID no encontrado" });
-    }
-
-    const tokenData = snapshot.val();
-    const dbToken = String(tokenData.token || "");
-    const now = Date.now();
-
-    if (dbToken === token) {
-      let name = null;
-      try {
-        const sSnap = await db.ref(`students/${id}`).once("value");
-        if (sSnap.exists()) name = sSnap.val().name || null;
-      } catch (e) { /* ignore */ }
-
-      await logAccess({ id, studentUid: id, name, token, authorized: true, reason: "ok" });
-      console.log(`✅ Acceso autorizado para ${id}`);
-      return res.json({ authorized: true, message: "Acceso autorizado" });
-    } else {
-      await logAccess({ id, token, authorized: false, reason: "token incorrecto" });
-      console.log(`❌ Token incorrecto para ${id}`);
-      return res.json({ authorized: false, message: "Token incorrecto" });
-    }
-
-  } catch (error) {
-    console.error("Error en /verify:", error);
-    await logAccess({ id: req.body?.id, token: req.body?.token, authorized: false, reason: "server error" });
-    return res.status(500).json({ authorized: false, message: "Error interno del servidor" });
-  }
+app.post("/verify", async (_req, res) => {
+  return res.status(410).json({
+    ok: false,
+    error: "legacy endpoint disabled",
+    message: "Use /validate para aplicar cooldown, expiración, historial y controles actuales."
+  });
 });
 
 // GET /history
 // GET /history (mejorado) -> soporta ?limit=50 & ?guardId=... & ?shiftId=...
-app.get("/history", async (req: Request, res: Response) => {
+app.get("/history", requireFirebaseAdmin, async (req: Request, res: Response) => {
   try {
-    const limit = Math.min(Number(req.query.limit) || 200, 1000);
+    const limit = sanitizeLimit(req.query.limit, 200, 1000);
     const guardIdQ = String(req.query.guardId || "").trim();
     const shiftIdQ = String(req.query.shiftId || "").trim();
     // Cargamos accessHistory (limitar lectura es posible si la DB crece)
@@ -512,7 +1011,7 @@ app.get("/history", async (req: Request, res: Response) => {
 
 
 // GET /user/:id
-app.get("/user/:id", async (req, res) => {
+app.get("/user/:id", requireAdminOrGuard, async (req, res) => {
   try {
     const id = String(req.params.id || "").trim();
     if (!id) return res.status(400).json({ ok: false, error: "missing id" });
@@ -543,16 +1042,19 @@ app.get("/user/:id", async (req, res) => {
       console.warn("user/:id -> error reading tokens:", e);
     }
 
-    let qrDataUrl: string | null = null;
-    if (token) {
-      try {
-        qrDataUrl = await QRCode.toDataURL(JSON.stringify({ id, token }), { margin: 1, scale: 8 });
-      } catch (e) {
-        console.warn("user/:id -> error generating QR:", e);
-      }
-    }
+    const dynamic = createDynamicQrToken(id);
+    const qrDataUrl = await genDynamicQrDataUrl(dynamic.token);
 
-    return res.json({ ok: true, id, name, role, token: token ? token : null, qrDataUrl });
+    return res.json({
+      ok: true,
+      id,
+      name,
+      role,
+      token: dynamic.token,
+      qrDataUrl,
+      qrVersion: dynamic.payload.v,
+      expiresAt: dynamic.payload.exp
+    });
   } catch (err) {
     console.error("GET /user/:id error:", err);
     return res.status(500).json({ ok: false, error: "server error" });
@@ -564,7 +1066,7 @@ app.get("/user/:id", async (req, res) => {
    -------------------- */
 
 // GET /users
-app.get("/users", async (req, res) => {
+app.get("/users", requireFirebaseAdmin, async (req, res) => {
   try {
     const qRole = String(req.query.role || "").trim().toLowerCase();
     const studentsSnap = await db.ref("students").once("value");
@@ -573,12 +1075,17 @@ app.get("/users", async (req, res) => {
 
     const users = await Promise.all(ids.map(async (id) => {
       const s = studentsVal[id] || {};
-      let token = null;
-      try {
-        const tSnap = await db.ref(`accessTokens/${id}`).once("value");
-        if (tSnap.exists()) token = String(tSnap.val().token || null);
-      } catch (e) { /* ignore */ }
-      return { id, name: s.name || null, role: s.role || null, token };
+      const dynamic = createDynamicQrToken(id);
+      const qrDataUrl = await genDynamicQrDataUrl(dynamic.token);
+      return {
+        id,
+        name: s.name || null,
+        role: s.role || null,
+        token: dynamic.token,
+        qrDataUrl,
+        qrVersion: dynamic.payload.v,
+        expiresAt: dynamic.payload.exp
+      };
     }));
 
     const filtered = qRole ? users.filter(u => (u.role || "").toLowerCase() === qRole) : users;
@@ -620,14 +1127,26 @@ app.post("/users",requireFirebaseAdmin, async (req, res) => {
       token = String(tokenSnap.val().token || "");
     }
 
-    let qrDataUrl: string | null = null;
-    try {
-      qrDataUrl = await QRCode.toDataURL(JSON.stringify({ id, token }), { margin:1, scale:8 });
-    } catch (e) {
-      console.warn("QR gen failed:", e);
-    }
+    const dynamic = createDynamicQrToken(id);
+    const qrDataUrl = await genDynamicQrDataUrl(dynamic.token);
 
-    return res.json({ ok: true, id, name, role, token, qrDataUrl });
+    await logAdminAction(req, {
+      action: tokenSnap.exists() ? "user.upsert" : "user.create",
+      entityType: "user",
+      entityId: id,
+      metadata: { role, regeneratedToken: regenerate === true || !tokenSnap.exists() }
+    });
+
+    return res.json({
+      ok: true,
+      id,
+      name,
+      role,
+      token: dynamic.token,
+      qrDataUrl,
+      qrVersion: dynamic.payload.v,
+      expiresAt: dynamic.payload.exp
+    });
   } catch (err) {
     console.error("POST /users error:", err);
     return res.status(500).json({ ok:false, error:"server error" });
@@ -666,14 +1185,26 @@ app.put("/users/:id",requireFirebaseAdmin, async (req, res) => {
     const sSnap = await db.ref(`students/${id}`).once("value");
     const student = sSnap.exists() ? sSnap.val() : {};
 
-    let qrDataUrl: string | null = null;
-    if (token) {
-      try {
-        qrDataUrl = await QRCode.toDataURL(JSON.stringify({ id, token }), { margin:1, scale:8 });
-      } catch (e) { /* ignore */ }
-    }
+    const dynamic = createDynamicQrToken(id);
+    const qrDataUrl = await genDynamicQrDataUrl(dynamic.token);
 
-    return res.json({ ok:true, id, name: student.name || null, role: student.role || null, token, qrDataUrl });
+    await logAdminAction(req, {
+      action: regenerate === true ? "user.regenerate_token" : "user.update",
+      entityType: "user",
+      entityId: id,
+      metadata: { fields: Object.keys(updates) }
+    });
+
+    return res.json({
+      ok: true,
+      id,
+      name: student.name || null,
+      role: student.role || null,
+      token: dynamic.token,
+      qrDataUrl,
+      qrVersion: dynamic.payload.v,
+      expiresAt: dynamic.payload.exp
+    });
   } catch (err) {
     console.error("PUT /users/:id error:", err);
     return res.status(500).json({ ok:false, error:"server error" });
@@ -688,6 +1219,12 @@ app.delete("/users/:id",requireFirebaseAdmin, async (req, res) => {
 
     await db.ref(`students/${id}`).remove();
     await db.ref(`accessTokens/${id}`).remove();
+
+    await logAdminAction(req, {
+      action: "user.delete",
+      entityType: "user",
+      entityId: id
+    });
 
     return res.json({ ok: true, id, message: "deleted" });
   } catch (err) {
@@ -712,11 +1249,31 @@ app.post('/guard/login', async (req, res) => {
     if (!guardId || !pin) 
       return res.status(400).json({ ok:false, error:'missing guardId or pin' });
 
+    if (isGuardLoginLocked(req, guardId)) {
+      await logSecurityEvent({
+        type: "guard.login",
+        subjectId: guardId,
+        outcome: "blocked",
+        reason: "too many failed attempts",
+        ip: req.ip || null
+      });
+      return res.status(429).json({ ok:false, error:'too many attempts, try later' });
+    }
+
     await migrateExpiredTempPins();
 
     const gSnap = await db.ref(`guards/${guardId}`).once('value');
-    if (!gSnap.exists()) 
-      return res.status(404).json({ ok:false, error: 'guard not found' });
+    if (!gSnap.exists()) {
+      recordGuardLoginFailure(req, guardId);
+      await logSecurityEvent({
+        type: "guard.login",
+        subjectId: guardId,
+        outcome: "failure",
+        reason: "invalid credentials",
+        ip: req.ip || null
+      });
+      return res.status(401).json({ ok:false, error: 'invalid credentials' });
+    }
     const g: any = gSnap.val();
 
     // ----- validar PIN permanente -----
@@ -728,6 +1285,15 @@ app.post('/guard/login', async (req, res) => {
           JWT_SECRET,
           { expiresIn: "24h" }
         );
+        clearGuardLoginFailures(req, guardId);
+        await db.ref(`guards/${guardId}`).update({ lastLogin: Date.now() });
+        await logSecurityEvent({
+          type: "guard.login",
+          subjectId: guardId,
+          outcome: "success",
+          reason: "permanent pin",
+          ip: req.ip || null
+        });
         return res.json({ ok:true, guardId, method:'permanent', token });
       }
     }
@@ -741,8 +1307,26 @@ app.post('/guard/login', async (req, res) => {
 
         let method = "temp-active";
 
-        // temp expirado -> promover a permanente
         if (expiresAt !== 0 && now > expiresAt) {
+          await db.ref(`guards/${guardId}`).update({
+            tempPinHash: null,
+            tempPinCreatedAt: null,
+            tempPinExpiresAt: null,
+            tempPinInvalidatedAt: now
+          });
+          recordGuardLoginFailure(req, guardId);
+          await logSecurityEvent({
+            type: "guard.login",
+            subjectId: guardId,
+            outcome: "failure",
+            reason: "temporary pin expired",
+            ip: req.ip || null
+          });
+          return res.status(401).json({ ok:false, error:'temporary pin expired' });
+        }
+
+        // temp vigente -> promover a permanente después de autenticación exitosa
+        if (expiresAt !== 0) {
           const updates: any = {};
           updates[`guards/${guardId}/pinHash`] = g.tempPinHash;
           updates[`guards/${guardId}/pinCreatedAt`] = g.tempPinCreatedAt || now;
@@ -759,12 +1343,29 @@ app.post('/guard/login', async (req, res) => {
           { expiresIn: "24h" }
         );
 
+        clearGuardLoginFailures(req, guardId);
+        await db.ref(`guards/${guardId}`).update({ lastLogin: Date.now() });
+        await logSecurityEvent({
+          type: "guard.login",
+          subjectId: guardId,
+          outcome: "success",
+          reason: method,
+          ip: req.ip || null
+        });
         return res.json({ ok:true, guardId, method, token });
       }
     }
 
     // credenciales inválidas
-    return res.status(401).json({ ok:false, error:'invalid pin' });
+    recordGuardLoginFailure(req, guardId);
+    await logSecurityEvent({
+      type: "guard.login",
+      subjectId: guardId,
+      outcome: "failure",
+      reason: "invalid credentials",
+      ip: req.ip || null
+    });
+    return res.status(401).json({ ok:false, error:'invalid credentials' });
 
   } catch (err) {
     console.error('/guard/login error', err);
@@ -854,7 +1455,7 @@ app.post("/guard/shift/end", requireGuard, async (req, res) => {
 app.post("/guard/authorize", requireGuard, async (req, res) => {
   try {
     const guardId = (req as any).guard.id;
-    const { studentId, token, sessionId = "default", note, shiftId } = req.body || {};
+    const { studentId, token, sessionId = "default", note, shiftId, type = "auto" } = req.body || {};
     if (!studentId && !token) return res.status(400).json({ ok: false, error: "studentId or token required" });
 
     const now = Date.now();
@@ -968,7 +1569,28 @@ app.post("/guard/authorize", requireGuard, async (req, res) => {
     }
 
     // --------------
-    // 3) Si llegamos aquí: guard en turno y usuario existe -> proceder con autorización
+    // 3) Resolver transición de presencia antes de registrar la autorización.
+    // --------------
+    if (!resolvedStudentId) {
+      return res.status(400).json({ ok: false, error: "No se pudo resolver el usuario" });
+    }
+
+    const transition = await commitAccessTransition(resolvedStudentId, String(type).trim().toLowerCase(), sessionId);
+    if (!transition.ok) {
+      await logAccess({
+        id: resolvedStudentId,
+        name: studentName || undefined,
+        token: token || null,
+        authorized: false,
+        reason: transition.reason,
+        sessionId,
+        validationMode: "manual"
+      });
+      return res.status(409).json({ ok: false, error: transition.reason });
+    }
+
+    // --------------
+    // 4) Guard en turno y usuario existente: persistir evidencia completa.
     // --------------
     const authRef = db.ref("guardAuthorizations").push();
     const authId = authRef.key!;
@@ -981,18 +1603,28 @@ app.post("/guard/authorize", requireGuard, async (req, res) => {
       reason: "manual_override",
       note: note || null,
       timestamp: now,
-      sessionId
+      sessionId,
+      accessType: transition.accessType,
+      previousInside: transition.previousInside,
+      newInside: transition.newInside,
+      validationMode: "manual"
     });
 
-    if (resolvedStudentId) {
-      await db.ref(`attendance/${sessionId}/${resolvedStudentId}`).push({
-        type: "manual_entry_by_guard",
-        timestamp: now,
-        guardId,
-        authId,
-        shiftId: foundShift ? foundShift.id : (shiftId || null)
-      });
-    }
+    await db.ref(`students/${resolvedStudentId}`).update({
+      lastAccessTimestamp: now,
+      lastAccessType: transition.accessType
+    });
+    await db.ref(`attendance/${sessionId}/${resolvedStudentId}`).push({
+      type: transition.accessType,
+      accessType: transition.accessType,
+      timestamp: now,
+      guardId,
+      authId,
+      shiftId: foundShift ? foundShift.id : (shiftId || null),
+      previousInside: transition.previousInside,
+      newInside: transition.newInside,
+      validationMode: "manual"
+    });
 
     await db.ref("accessHistory").push({
       id: resolvedStudentId || null,
@@ -1002,10 +1634,22 @@ app.post("/guard/authorize", requireGuard, async (req, res) => {
       note: note || null,
       timestamp: now,
       guardOverrideId: authId,
-      shiftId: foundShift ? foundShift.id : (shiftId || null)
+      shiftId: foundShift ? foundShift.id : (shiftId || null),
+      accessType: transition.accessType,
+      previousInside: transition.previousInside,
+      newInside: transition.newInside,
+      validationMode: "manual",
+      qrVersion: null,
+      sessionId
     });
 
-    return res.json({ ok: true, authId, timestamp: now });
+    return res.json({
+      ok: true,
+      authId,
+      timestamp: now,
+      accessType: transition.accessType,
+      inside: transition.newInside
+    });
   } catch (err) {
     console.error("guard/authorize", err);
     await logAccess({ token: req.body?.token || null, id: req.body?.studentId || null, authorized: false, reason: "server error" });
@@ -1018,15 +1662,18 @@ app.post("/guard/authorize", requireGuard, async (req, res) => {
    Admin read endpoints for shifts/authorizations/teachers/admins
    -------------------- */
 
-// GET /guardShifts?active=true&guardId=xxx  (admin or public read)
-app.get("/guardShifts", async (req, res) => {
+// GET /guardShifts?active=true&guardId=xxx
+app.get("/guardShifts", requireAdminOrGuard, async (req, res) => {
   try {
-    const guardIdQ = String(req.query.guardId || "").trim();
+    const requesterGuardId = (req as any).guard?.id ? String((req as any).guard.id) : "";
+    const isAdmin = !!(req as any).admin;
+    const guardIdQ = requesterGuardId || String(req.query.guardId || "").trim();
     const activeQ = String(req.query.active || "").toLowerCase(); // "true"|"false"|""
     const snap = await db.ref("guardShifts").once("value");
     const val = snap.val() || {};
     let arr = Object.keys(val).map(k => ({ id: k, ...(val[k] || {}) }));
     if (guardIdQ) arr = arr.filter(s => String(s.guardId) === guardIdQ);
+    if (!isAdmin && requesterGuardId) arr = arr.filter(s => String(s.guardId) === requesterGuardId);
     if (activeQ === "true") arr = arr.filter(s => !s.endTimestamp && s.active !== false);
     if (activeQ === "false") arr = arr.filter(s => s.endTimestamp || s.active === false);
     // ordenar desc por startTimestamp
@@ -1039,9 +1686,10 @@ app.get("/guardShifts", async (req, res) => {
 });
 
 // GET /guardAuthorizations
-app.get("/guardAuthorizations", async (req, res) => {
+app.get("/guardAuthorizations", requireAdminOrGuard, async (req, res) => {
   try {
-    const guardId = String(req.query.guardId || "").trim();
+    const requesterGuardId = (req as any).guard?.id ? String((req as any).guard.id) : "";
+    const guardId = requesterGuardId || String(req.query.guardId || "").trim();
     const snap = await db.ref("guardAuthorizations").once("value");
     const val = snap.val() || {};
     const arr = Object.keys(val).map(k => ({ id: k, ...val[k] }));
@@ -1068,24 +1716,12 @@ app.get('/guards',requireFirebaseAdmin, async (req, res) => {
 
 const GUARDS_PATH = 'guards'; 
 
-app.get('/api/guards/:id/pin', async (req, res) => {
-    const guardId = req.params.id; 
-
-    try {
-        // Obtenemos el valor del campo 'pin' directamente en la referencia: /guards/[guardId]/pin
-        const pinSnapshot = await rtdb.ref(`${GUARDS_PATH}/${guardId}/pin`).once('value');
-        const pin = pinSnapshot.val(); 
-
-        if (pin) {
-            // Devolvemos el PIN como un objeto JSON
-            return res.status(200).json({ pin: pin });
-        } else {
-            return res.status(404).json({ error: 'PIN o Guardia no encontrado.' });
-        }
-    } catch (error) {
-        console.error("Error al obtener el PIN del guardia:", error);
-        return res.status(500).json({ error: 'Error interno del servidor.' });
-    }
+app.get('/api/guards/:id/pin', requireFirebaseAdmin, async (_req, res) => {
+    return res.status(410).json({
+      ok: false,
+      error: "plain pin retrieval disabled",
+      message: "Por seguridad, los PIN no se leen en texto plano. Use el flujo de reseteo para generar un PIN de un solo uso."
+    });
 });
 
 /* --------------------
@@ -1099,12 +1735,9 @@ app.get("/teachers",requireFirebaseAdmin, async (req, res) => {
     const val = snap.val() || {};
     const ids = Object.keys(val);
     const out = await Promise.all(ids.map(async id => {
-      const token = await (async () => {
-        const tSnap = await db.ref(`accessTokens/${id}`).once("value");
-        return tSnap.exists() ? String(tSnap.val().token || null) : null;
-      })();
-      const qrDataUrl = token ? await genQrDataUrl(id, token) : null;
-      return { id, name: val[id].name || null, createdAt: val[id].createdAt || null, token, qrDataUrl };
+      const dynamic = createDynamicQrToken(id);
+      const qrDataUrl = await genDynamicQrDataUrl(dynamic.token);
+      return { id, name: val[id].name || null, createdAt: val[id].createdAt || null, token: dynamic.token, qrDataUrl, qrVersion: dynamic.payload.v, expiresAt: dynamic.payload.exp };
     }));
     return res.json({ ok:true, count: out.length, data: out });
   } catch (err) {
@@ -1128,9 +1761,14 @@ app.post("/teachers",requireFirebaseAdmin, async (req, res) => {
     id = String(id);
 
     await db.ref(`teachers/${id}`).update({ name, role:"docente", createdAt: Date.now() });
-    const token = await ensureTokenForId(id);
-    const qrDataUrl = await genQrDataUrl(id, token);
-    return res.json({ ok:true, id, name, token, qrDataUrl });
+    const dynamic = createDynamicQrToken(id);
+    const qrDataUrl = await genDynamicQrDataUrl(dynamic.token);
+    await logAdminAction(req, {
+      action: "teacher.create",
+      entityType: "teacher",
+      entityId: id
+    });
+    return res.json({ ok:true, id, name, token: dynamic.token, qrDataUrl, qrVersion: dynamic.payload.v, expiresAt: dynamic.payload.exp });
   } catch (err) {
     console.error("POST /teachers", err);
     return res.status(500).json({ ok:false, error:"server error" });
@@ -1145,10 +1783,15 @@ app.put("/teachers/:id",requireFirebaseAdmin, async (req, res) => {
     if (!id) return res.status(400).json({ ok:false, error:"missing id" });
     if (!name) return res.status(400).json({ ok:false, error:"name required" });
     await db.ref(`teachers/${id}`).update({ name });
-    const tSnap = await db.ref(`accessTokens/${id}`).once("value");
-    const token = tSnap.exists() ? String(tSnap.val().token || null) : null;
-    const qrDataUrl = token ? await genQrDataUrl(id, token) : null;
-    return res.json({ ok:true, id, name, token, qrDataUrl });
+    const dynamic = createDynamicQrToken(id);
+    const qrDataUrl = await genDynamicQrDataUrl(dynamic.token);
+    await logAdminAction(req, {
+      action: "teacher.update",
+      entityType: "teacher",
+      entityId: id,
+      metadata: { fields: ["name"] }
+    });
+    return res.json({ ok:true, id, name, token: dynamic.token, qrDataUrl, qrVersion: dynamic.payload.v, expiresAt: dynamic.payload.exp });
   } catch (err) {
     console.error("PUT /teachers/:id", err);
     return res.status(500).json({ ok:false, error:"server error" });
@@ -1162,6 +1805,11 @@ app.delete("/teachers/:id",requireFirebaseAdmin , async (req, res) => {
     if (!id) return res.status(400).json({ ok:false, error:"missing id" });
     await db.ref(`teachers/${id}`).remove();
     await db.ref(`accessTokens/${id}`).remove();
+    await logAdminAction(req, {
+      action: "teacher.delete",
+      entityType: "teacher",
+      entityId: id
+    });
     return res.json({ ok:true, id, message:"deleted" });
   } catch (err) {
     console.error("DELETE /teachers/:id", err);
@@ -1193,7 +1841,9 @@ app.get('/admins',requireFirebaseAdmin, async (req, res) => {
       return {
         id: String(v.id || k),
         name: v.name || v.fullName || v.nombre || null,
-        raw: v
+        email: v.email || null,
+        role: v.role || null,
+        createdAt: v.createdAt || null
       };
     });
 
@@ -1209,12 +1859,20 @@ app.get('/admins',requireFirebaseAdmin, async (req, res) => {
 
 
 
-// DEBUG endpoint sin auth: mostrar crudo admins (solo local/dev)
-app.get('/debug/admins', async (req, res) => {
+// DEBUG endpoint protegido y disponible solo en desarrollo.
+app.get('/debug/admins', requireFirebaseAdmin, async (req, res) => {
+  if (IS_PRODUCTION) return res.status(404).json({ ok: false, error: "not found" });
   try {
     const snap = await db.ref('admins').once('value');
     const val = snap.val() || {};
-    return res.json({ ok: true, raw: val, keys: Object.keys(val || {}) });
+    const sanitized = Object.keys(val || {}).map(k => ({
+      id: String(val[k]?.id || k),
+      name: val[k]?.name || val[k]?.fullName || val[k]?.nombre || null,
+      email: val[k]?.email || null,
+      role: val[k]?.role || null,
+      createdAt: val[k]?.createdAt || null
+    }));
+    return res.json({ ok: true, data: sanitized, keys: Object.keys(val || {}) });
   } catch (e) {
     console.error('debug/admins error', e);
     return res.status(500).json({ ok: false, error: 'server error' });
@@ -1235,9 +1893,14 @@ app.post("/admins",requireFirebaseAdmin, async (req, res) => {
     }
     id = String(id);
     await db.ref(`admins/${id}`).update({ name, role:"admin", createdAt: Date.now() });
-    const token = await ensureTokenForId(id);
-    const qrDataUrl = await genQrDataUrl(id, token);
-    return res.json({ ok:true, id, name, token, qrDataUrl });
+    const dynamic = createDynamicQrToken(id);
+    const qrDataUrl = await genDynamicQrDataUrl(dynamic.token);
+    await logAdminAction(req, {
+      action: "admin_profile.create",
+      entityType: "admin",
+      entityId: id
+    });
+    return res.json({ ok:true, id, name, token: dynamic.token, qrDataUrl, qrVersion: dynamic.payload.v, expiresAt: dynamic.payload.exp });
   } catch (err) {
     console.error("POST /admins", err);
     return res.status(500).json({ ok:false, error:"server error" });
@@ -1272,6 +1935,14 @@ app.post('/admin/guard/shift/start',requireFirebaseAdmin, async (req, res) => {
       createdByAdminId: 'admin-ui',
       notes: notes || null
     });
+
+    await logAdminAction(req, {
+      action: "guard_shift.start",
+      entityType: "guardShift",
+      entityId: shiftId,
+      metadata: { guardId }
+    });
+
     return res.json({ ok:true, shiftId, startTimestamp: now });
   } catch (err) {
     console.error('/admin/guard/shift/start error:', err);
@@ -1290,6 +1961,12 @@ app.post('/admin/guard/shift/end',requireFirebaseAdmin, async (req, res) => {
       if (shift.endTimestamp) return res.status(400).json({ ok:false, error: 'shift already ended' });
       const endTs = Date.now();
       await db.ref(`guardShifts/${shiftId}`).update({ endTimestamp: endTs, active: false, notes: notes || shift.notes || null });
+      await logAdminAction(req, {
+        action: "guard_shift.end",
+        entityType: "guardShift",
+        entityId: shiftId,
+        metadata: { guardId: shift.guardId || null }
+      });
       return res.json({ ok:true, shiftId, endTimestamp: endTs });
     }
 
@@ -1308,14 +1985,19 @@ app.post('/admin/guard/shift/end',requireFirebaseAdmin, async (req, res) => {
     const endTs = Date.now();
     await db.ref(`guardShifts/${target.id}`).update({ endTimestamp: endTs, active: false, notes: notes || target.notes || null });
 
+    await logAdminAction(req, {
+      action: "guard_shift.end",
+      entityType: "guardShift",
+      entityId: target.id,
+      metadata: { guardId }
+    });
+
     return res.json({ ok:true, shiftId: target.id, endTimestamp: endTs, message: 'closed latest active shift' });
   } catch (err) {
     console.error('/admin/guard/shift/end error:', err);
     return res.status(500).json({ ok:false, error: 'server error' });
   }
 });
-
-const SERVER_ADMIN_SECRET = "mi_secreto_super_seguro";
 
 app.post("/admin/guards/:id/reset-pin", requireFirebaseAdmin, async (req, res) => {
   try {
@@ -1327,7 +2009,7 @@ app.post("/admin/guards/:id/reset-pin", requireFirebaseAdmin, async (req, res) =
     if (!gSnap.exists()) return res.status(404).json({ ok:false, error:"guard not found" });
 
     const clientSecret = req.headers['x-admin-secret'];
-    if (!clientSecret || clientSecret !== SERVER_ADMIN_SECRET) {
+    if (!clientSecret || !safeCompareString(String(clientSecret), ADMIN_SECRET)) {
         return res.status(401).json({ error: 'Unauthorized. Invalid admin secret.' });
     }
 
@@ -1341,24 +2023,19 @@ app.post("/admin/guards/:id/reset-pin", requireFirebaseAdmin, async (req, res) =
     const expiresMs = 10 * 60 * 1000; // 10 minutos
     const expiresAt = now + expiresMs;
 
-    // Guardar el hash TEMPORAL (no sobrescribimos pinHash)
- await db.ref(`guards/${id}`).update({
-  pinHash: hash,
-  pinCreatedAt: Date.now(),
-  tempPinHash: null,
-  tempPinCreatedAt: null,
-  tempPinExpiresAt: null
+    // Guardar el hash temporal. Se promoverá a permanente solo si se usa antes de expirar.
+    await db.ref(`guards/${id}`).update({
+      tempPinHash: hash,
+      tempPinCreatedAt: now,
+      tempPinExpiresAt: expiresAt,
+      tempPinInvalidatedAt: null
     });
 
-    // Log de auditoría admin
-    const adminActor = (req.headers["x-admin-id"] || "admin-ui");
-    await db.ref("adminActions").push({
-      action: "resetPin",
-      actor: adminActor,
-      guardId: id,
-      timestamp: now,
-      note: req.body?.note || null,
-      ip: req.ip || null
+    await logAdminAction(req, {
+      action: "guard.reset_pin",
+      entityType: "guard",
+      entityId: id,
+      metadata: { expiresAt, note: req.body?.note || null }
     });
 
     // Devolver el PIN temporal SOLO en la respuesta (mostrar una vez en UI)
@@ -1404,10 +2081,15 @@ app.put("/admins/:id",requireFirebaseAdmin, async (req, res) => {
     if (!id) return res.status(400).json({ ok:false, error:"missing id" });
     if (!name) return res.status(400).json({ ok:false, error:"name required" });
     await db.ref(`admins/${id}`).update({ name });
-    const tSnap = await db.ref(`accessTokens/${id}`).once("value");
-    const token = tSnap.exists() ? String(tSnap.val().token || null) : null;
-    const qrDataUrl = token ? await genQrDataUrl(id, token) : null;
-    return res.json({ ok:true, id, name, token, qrDataUrl });
+    const dynamic = createDynamicQrToken(id);
+    const qrDataUrl = await genDynamicQrDataUrl(dynamic.token);
+    await logAdminAction(req, {
+      action: "admin_profile.update",
+      entityType: "admin",
+      entityId: id,
+      metadata: { fields: ["name"] }
+    });
+    return res.json({ ok:true, id, name, token: dynamic.token, qrDataUrl, qrVersion: dynamic.payload.v, expiresAt: dynamic.payload.exp });
   } catch (err) {
     console.error("PUT /admins/:id", err);
     return res.status(500).json({ ok:false, error:"server error" });
@@ -1416,7 +2098,7 @@ app.put("/admins/:id",requireFirebaseAdmin, async (req, res) => {
 
 const rtdb = admin.database();
 
-app.put('/api/admins/:id', async (req, res) => {
+app.put('/api/admins/:id', requireFirebaseAdmin, async (req, res) => {
     // 1. Obtener el ID del administrador de la URL (ruta param)
     const adminId = req.params.id; 
     
@@ -1434,6 +2116,13 @@ app.put('/api/admins/:id', async (req, res) => {
         // 4. Usar el método .update() de Firebase para actualizar (mergear) los campos
         await adminRef.update(newData); 
 
+        await logAdminAction(req, {
+          action: "admin_profile.update",
+          entityType: "admin",
+          entityId: adminId,
+          metadata: { fields: Object.keys(newData) }
+        });
+
         return res.status(200).json({ message: 'Administrador actualizado con éxito.' });
     } catch (error) {
         console.error("Error al actualizar admin en Firebase:", error);
@@ -1449,6 +2138,11 @@ app.delete("/admins/:id",requireFirebaseAdmin, async (req, res) => {
     if (!id) return res.status(400).json({ ok:false, error:"missing id" });
     await db.ref(`admins/${id}`).remove();
     await db.ref(`accessTokens/${id}`).remove();
+    await logAdminAction(req, {
+      action: "admin_profile.delete",
+      entityType: "admin",
+      entityId: id
+    });
     return res.json({ ok:true, id, message:"deleted" });
   } catch (err) {
     console.error("DELETE /admins/:id", err);
@@ -1491,7 +2185,7 @@ app.get("/shift/:shiftId/history",requireFirebaseAdmin, async (req, res) => {
   }
 });
 
-app.post('/guards/create', async (req, res) => {
+app.post('/guards/create', requireFirebaseAdmin, async (req, res) => {
   try {
     const { id, name, pin } = req.body;
     if (!id || !name || !pin) return res.status(400).json({ ok: false, error: 'missing fields' });
@@ -1501,6 +2195,12 @@ app.post('/guards/create', async (req, res) => {
       name,
       pinHash: hash,
       createdAt: Date.now()
+    });
+
+    await logAdminAction(req, {
+      action: "guard.create",
+      entityType: "guard",
+      entityId: id
     });
 
     res.json({ ok: true, id, name });

@@ -6,6 +6,7 @@
   <title>Bienvenido - Identifícate</title>
 
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="css/app.css">
 
   <style>
     :root{
@@ -64,41 +65,15 @@
     }
   </style>
 
-  <!-- html5-qrcode: try CDN then fallback to local copy -->
+  <!-- Carga local síncrona para que el escáner esté disponible antes de inicializar la UI. -->
   <script>
-  (function loadHtml5Qrcode() {
-    const cdn = "https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js";
-    function inject(src) {
-      return new Promise((res, rej) => {
-        const s = document.createElement('script');
-        s.src = src;
-        s.async = true;
-        s.onload = () => res(src);
-        s.onerror = (e) => rej(e);
-        document.head.appendChild(s);
-      });
-    }
-
-    inject(cdn)
-      .then(src => console.log('[INIT] html5-qrcode loaded from CDN:', src))
-      .catch(err => {
-        console.warn('[INIT] CDN failed, attempting local fallback. Error:', err);
-        // local fallback path (serve this file from your frontend folder)
-        return inject('/js/html5-qrcode.min.js')
-          .then(src => console.log('[INIT] html5-qrcode loaded locally:', src))
-          .catch(err2 => {
-            console.error('[INIT] local fallback also failed:', err2);
-            // inform user in UI
-            const r = document.getElementById('reader') || document.body;
-            const msg = document.createElement('div');
-            msg.style.color = 'salmon';
-            msg.style.padding = '12px';
-            msg.innerText = 'Error cargando el escáner (html5-qrcode). Revisa la consola.';
-            if (r && r.prepend) r.prepend(msg);
-          });
-      });
-  })();
+    window.Html5Qrcode = window.Html5Qrcode || undefined;
+    window.Html5QrcodeScanner = window.Html5QrcodeScanner || undefined;
+    window.Html5QrcodeSupportedFormats = window.Html5QrcodeSupportedFormats || undefined;
+    window.Html5QrcodeScannerState = window.Html5QrcodeScannerState || undefined;
+    window.Html5QrcodeScanType = window.Html5QrcodeScanType || undefined;
   </script>
+  <script src="./js/html5-qrcode.min.js"></script>
 
 </head>
 <body>
@@ -109,7 +84,7 @@
           <h4>Bienvenido — Identifícate</h4>
           <div class="small-muted">Escanea el código QR o revisa tu historial.</div>
         </div>
-        <a id="openHistoryBtn" href="history.html" class="btn btn-outline-light">Ver historial</a>
+        <a id="openHistoryBtn" href="admin.html#history" class="btn btn-outline-light">Historial admin</a>
       </div>
 
       <div id="reader" class="mb-3">
@@ -117,6 +92,15 @@
       </div>
 
       <div id="status" class="alert alert-secondary">Esperando escaneo...</div>
+
+      <div class="controls mb-2">
+        <label for="accessType" class="small-muted">Tipo de movimiento</label>
+        <select id="accessType" class="form-select" style="max-width:220px">
+          <option value="auto" selected>Automático</option>
+          <option value="entry">Registrar entrada</option>
+          <option value="exit">Registrar salida</option>
+        </select>
+      </div>
 
       <div class="d-flex align-items-center my-2 controls">
         <span id="led" class="led off"></span>
@@ -142,6 +126,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const subText = document.getElementById('subText');
   const ledEl = document.getElementById('led');
   const readerEl = document.getElementById('reader');
+  const accessTypeEl = document.getElementById('accessType');
 
   function setStatus(kind, main, sub='') {
     statusEl.className = 'alert';
@@ -194,16 +179,17 @@ document.addEventListener("DOMContentLoaded", () => {
 
     setStatus("warning","Validando...","Conectando al servidor");
 
-    const payload = parseQrPayload(decodedText);
-    const res = await sendToBackend(payload);
+    const payload = parseQrPayload(decodedText);
+    payload.type = accessTypeEl.value;
+    const res = await sendToBackend(payload);
     
     let mainMessage = "✖ Acceso denegado";
     let subMessage = res.error || "Error desconocido del servidor.";
     let statusKind = "error";
 
-    if (res.ok === true) {
-      mainMessage = "✔ Acceso autorizado";
-      subMessage = res.message || "Bienvenido/a!";
+    if (res.ok === true) {
+      mainMessage = "✔ Acceso autorizado";
+      subMessage = `${res.message || "Movimiento registrado"}. Estado: ${res.inside ? "dentro" : "fuera"}.`;
       statusKind = "success";
     } else {
       if (res.reason === "COOLDOWN_ACTIVE") {

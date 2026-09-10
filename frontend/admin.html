@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Admin — Control de Seguridad (Usuarios & Shifts & Historial & Guardias)</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="css/app.css">
   <style>
     /* User + theme styles */
     body { background:#0f1724; color:#e6eef8; padding:1rem; }
@@ -18,6 +19,8 @@
     #pinModal { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); align-items:center; justify-content:center; z-index:9999; }
     #pinModal .modal-box { background:#fff; color:#000; padding:1rem; border-radius:8px; width: 360px; max-width:95%; }
     #guardsPane { max-height:520px; overflow:auto; }
+    .kpi-box { background:rgba(255,255,255,0.035); border:1px solid rgba(255,255,255,0.06); border-radius:8px; padding:1rem; }
+    .kpi-box h4 { margin:0; font-size:1.65rem; }
 
     /* ==== Injected improvements - dark cards + visible buttons ==== */
     .card {
@@ -54,10 +57,15 @@
   <div class="container">
 
     <!-- Header + internal nav -->
-    <div class="d-flex align-items-center justify-content-between mb-3">
-      <h3>Admin — Panel</h3>
+    <div class="d-flex align-items-center justify-content-between mb-3 app-header">
       <div>
+        <div class="app-kicker">Operación segura</div>
+        <h3 class="app-title mb-0">Panel de control</h3>
+      </div>
+      <div class="app-nav">
         <button id="btnNavUsers" class="btn btn-sm btn-outline-light nav-btn">Usuarios</button>
+        <button id="btnNavMetrics" class="btn btn-sm btn-outline-light nav-btn">KPIs</button>
+        <button id="btnNavPresence" class="btn btn-sm btn-outline-light nav-btn">Dentro ahora</button>
         <button id="btnNavShifts" class="btn btn-sm btn-outline-light nav-btn">Turnos</button>
         <button id="btnNavGuards" class="btn btn-sm btn-outline-light nav-btn">Guardias</button>
         <button id="btnNavHistory" class="btn btn-sm btn-outline-light nav-btn">Historial</button>
@@ -66,6 +74,66 @@
     </div>
 
     <div id="alertArea"></div>
+
+    <section id="sectionMetrics" class="card p-3 mb-3 hidden">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <h5 class="m-0">KPIs operacionales y auditoría</h5>
+        <button id="btnRefreshMetrics" class="btn btn-sm btn-outline-light">Actualizar</button>
+      </div>
+
+      <div class="row g-3 mb-3" id="metricsCards">
+        <div class="col-md-3"><div class="kpi-box"><div class="small-muted">Accesos 24h</div><h4 id="kpiAccess24h">—</h4></div></div>
+        <div class="col-md-3"><div class="kpi-box"><div class="small-muted">Autorizados 24h</div><h4 id="kpiAuthorized24h">—</h4></div></div>
+        <div class="col-md-3"><div class="kpi-box"><div class="small-muted">Rechazados 24h</div><h4 id="kpiRejected24h">—</h4></div></div>
+        <div class="col-md-3"><div class="kpi-box"><div class="small-muted">Guardias en turno</div><h4 id="kpiActiveShifts">—</h4></div></div>
+      </div>
+
+      <div class="row g-3 mb-3">
+        <div class="col-md-3"><div class="kpi-box"><div class="small-muted">Tasa rechazo 24h</div><h4 id="kpiRejectionRate">—</h4></div></div>
+        <div class="col-md-3"><div class="kpi-box"><div class="small-muted">Overrides manuales</div><h4 id="kpiManualOverrides">—</h4></div></div>
+        <div class="col-md-3"><div class="kpi-box"><div class="small-muted">Usuarios registrados</div><h4 id="kpiUsers">—</h4></div></div>
+        <div class="col-md-3"><div class="kpi-box"><div class="small-muted">Guardias registrados</div><h4 id="kpiGuards">—</h4></div></div>
+        <div class="col-md-3"><div class="kpi-box metric-accent"><div class="small-muted">Personas dentro</div><h4 id="kpiPeopleInside">—</h4></div></div>
+      </div>
+
+      <h6 class="mt-3">Últimas acciones administrativas</h6>
+      <div class="table-responsive">
+        <table class="table table-sm table-borderless text-white align-middle">
+          <thead class="muted">
+            <tr><th>Fecha/Hora</th><th>Actor</th><th>Acción</th><th>Entidad</th><th>Detalle</th></tr>
+          </thead>
+          <tbody id="auditBody"><tr><td colspan="5" class="muted">Cargando...</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="sectionPresence" class="card p-3 mb-3 hidden">
+      <div class="section-heading mb-3">
+        <div>
+          <div class="app-kicker">Monitoreo operativo</div>
+          <h5 class="m-0">Personas actualmente dentro</h5>
+          <div class="small-muted">Estado calculado desde la última transición confirmada.</div>
+        </div>
+        <button id="btnRefreshPresence" class="btn btn-sm btn-outline-light">Actualizar</button>
+      </div>
+      <div class="row g-3 mb-3">
+        <div class="col-sm-4 col-lg-3">
+          <div class="kpi-box metric-accent">
+            <div class="small-muted">Dentro ahora</div>
+            <h4 id="presenceCount">—</h4>
+          </div>
+        </div>
+        <div class="col-sm-8 col-lg-9 d-flex align-items-center">
+          <div id="presenceUpdated" class="small-muted">Sin actualización todavía.</div>
+        </div>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-sm table-borderless text-white align-middle mb-0">
+          <thead><tr><th>Persona</th><th>Rol</th><th>Último movimiento</th><th>Hora</th><th>Sesión</th></tr></thead>
+          <tbody id="presenceBody"><tr><td colspan="5" class="muted">Cargando...</td></tr></tbody>
+        </table>
+      </div>
+    </section>
 
     <!-- SECTION: USERS (Admin) -->
     <section id="sectionUsers" class="card p-3 mb-3">
@@ -241,8 +309,8 @@
 <script>
 /* ====== CONFIG: ajusta según tu entorno ====== */
 const BACKEND_URL = "http://localhost:3000";   // cambia si corresponde
-// admin secret se saca de localStorage si está; hay fallback
-const ADMIN_SECRET = localStorage.getItem('admin_secret') || "mi_secreto_super_seguro";
+// admin secret se saca de localStorage si está; no debe hardcodearse en el cliente.
+let ADMIN_SECRET = localStorage.getItem('admin_secret') || "";
 /* ============================================ */
 
 window.addEventListener('load', () => {
@@ -262,13 +330,22 @@ function toast(msg, level='info', timeout=3500) {
   setTimeout(()=> { try { a.removeChild(el); } catch(e){} }, timeout);
 }
 
+function escapeHtml(s) {
+  if (s === null || s === undefined) return "";
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
 /* ---- Utils para llamadas al backend (admin) ---- */
 async function adminFetch(path, opts = {}) {
   opts.headers = opts.headers || {};
   const idToken = localStorage.getItem('idToken') || '';
   if (idToken) opts.headers['Authorization'] = 'Bearer ' + idToken;
-  // Añadimos siempre x-admin-secret para endpoints admin (backend lo espera)
-  opts.headers['x-admin-secret'] = ADMIN_SECRET;
+  if (ADMIN_SECRET) opts.headers['x-admin-secret'] = ADMIN_SECRET;
   opts.headers['Accept'] = 'application/json';
   if (opts.body && typeof opts.body !== 'string') {
     opts.body = JSON.stringify(opts.body);
@@ -464,6 +541,15 @@ function selectGuard(g) {
 document.getElementById('btnResetPinLocal')?.addEventListener('click', async () => {
   if (!selectedGuard) { toast('Selecciona un guard primero','warning'); return; }
   if (!confirm(`Generar PIN para ${selectedGuard.id}? (se mostrará solo una vez)`)) return;
+  if (!ADMIN_SECRET) {
+    const typed = prompt('Ingresa ADMIN_SECRET para autorizar el reseteo de PIN:');
+    if (!typed) {
+      toast('Reset cancelado: falta ADMIN_SECRET', 'warning');
+      return;
+    }
+    ADMIN_SECRET = typed;
+    localStorage.setItem('admin_secret', ADMIN_SECRET);
+  }
 
   const btn = document.getElementById('btnResetPinLocal');
   btn.disabled = true;
@@ -649,6 +735,94 @@ document.getElementById('btnShowAll').addEventListener('click', () => {
 });
 document.getElementById('btnFilterDate').addEventListener('click', () => refreshShiftsView());
 
+/* ===================== METRICS / AUDIT ===================== */
+async function loadMetricsDashboard() {
+  const r = await adminFetch('/admin/metrics', { method: 'GET' });
+  if (!r.ok) {
+    toast('Error cargando KPIs: ' + (r.body?.error || r.status), 'danger');
+    return;
+  }
+
+  const k = r.body.kpis || {};
+  document.getElementById('kpiAccess24h').textContent = k.accessEvents24h ?? '0';
+  document.getElementById('kpiAuthorized24h').textContent = k.authorizedAccesses24h ?? '0';
+  document.getElementById('kpiRejected24h').textContent = k.rejectedAccesses24h ?? '0';
+  document.getElementById('kpiActiveShifts').textContent = k.activeGuardShifts ?? '0';
+  document.getElementById('kpiRejectionRate').textContent = ((Number(k.rejectionRate24h || 0) * 100).toFixed(1)) + '%';
+  document.getElementById('kpiManualOverrides').textContent = k.manualOverrides24h ?? '0';
+  document.getElementById('kpiUsers').textContent = k.registeredUsers ?? '0';
+  document.getElementById('kpiGuards').textContent = k.registeredGuards ?? '0';
+  document.getElementById('kpiPeopleInside').textContent = k.peopleCurrentlyInside ?? '0';
+}
+
+async function loadAuditLog() {
+  const tbody = document.getElementById('auditBody');
+  tbody.innerHTML = '<tr><td colspan="5" class="muted">Cargando...</td></tr>';
+  const r = await adminFetch('/admin/audit-log?limit=50', { method: 'GET' });
+  if (!r.ok) {
+    tbody.innerHTML = `<tr><td colspan="5" class="muted">Error: ${escapeHtml(r.body?.error || r.status)}</td></tr>`;
+    return;
+  }
+
+  const rows = r.body.data || [];
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="muted">Sin acciones registradas</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = rows.map(a => {
+    const when = a.timestamp ? new Date(a.timestamp).toLocaleString() : '-';
+    const actor = a.actorEmail || a.actorId || '-';
+    const entity = `${a.entityType || '-'} ${a.entityId || ''}`.trim();
+    const detail = a.metadata ? JSON.stringify(a.metadata) : '';
+    return `<tr>
+      <td>${escapeHtml(when)}</td>
+      <td>${escapeHtml(actor)}</td>
+      <td>${escapeHtml(a.action || '-')}</td>
+      <td>${escapeHtml(entity)}</td>
+      <td class="mono">${escapeHtml(detail)}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function refreshMetricsSection() {
+  await loadMetricsDashboard();
+  await loadAuditLog();
+}
+
+document.getElementById('btnRefreshMetrics').addEventListener('click', refreshMetricsSection);
+
+/* ===================== CURRENT PRESENCE ===================== */
+async function loadPresence() {
+  const tbody = document.getElementById('presenceBody');
+  tbody.innerHTML = '<tr><td colspan="5" class="muted">Cargando...</td></tr>';
+  const r = await adminFetch('/presence', { method: 'GET' });
+  if (!r.ok) {
+    tbody.innerHTML = `<tr><td colspan="5" class="muted">Error: ${escapeHtml(r.body?.error || r.status)}</td></tr>`;
+    return;
+  }
+
+  const rows = r.body.data || [];
+  document.getElementById('presenceCount').textContent = String(r.body.count ?? rows.length);
+  document.getElementById('presenceUpdated').textContent = `Actualizado: ${new Date(r.body.generatedAt || Date.now()).toLocaleString('es-CL')}`;
+  if (!rows.length) {
+    tbody.innerHTML = '<tr><td colspan="5" class="presence-empty">No hay personas registradas dentro.</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = rows.map(person => `
+    <tr>
+      <td><strong>${escapeHtml(person.name || person.id)}</strong><div class="small-muted mono">${escapeHtml(person.id)}</div></td>
+      <td>${escapeHtml(person.role || '-')}</td>
+      <td><span class="badge bg-success">${person.lastAccessType === 'entry' ? 'Entrada' : 'Dentro'}</span></td>
+      <td>${person.lastTimestamp ? new Date(person.lastTimestamp).toLocaleString('es-CL') : '-'}</td>
+      <td class="mono">${escapeHtml(person.sessionId || '-')}</td>
+    </tr>
+  `).join('');
+}
+
+document.getElementById('btnRefreshPresence').addEventListener('click', loadPresence);
+
 /* ===================== HISTORY ===================== */
 async function loadHistoryTable() {
   const tbody = document.getElementById('historyBody');
@@ -658,10 +832,10 @@ async function loadHistoryTable() {
   tbody.innerHTML = '<tr><td colspan="6" class="muted">Cargando...</td></tr>';
 
   try {
-    const resp = await fetch(`${BACKEND_URL}/history?limit=500`);
-    const js = await resp.json();
-    if (!js.ok) {
-      tbody.innerHTML = `<tr><td colspan="6" class="muted">Error: ${js.error}</td></tr>`;
+    const r = await adminFetch('/history?limit=500', { method: 'GET' });
+    const js = r.body || {};
+    if (!r.ok || !js.ok) {
+      tbody.innerHTML = `<tr><td colspan="6" class="muted">Error: ${escapeHtml(js.error || r.status)}</td></tr>`;
       return;
     }
 
@@ -705,12 +879,12 @@ async function loadHistoryTable() {
         resultHtml = `<span class="badge bg-secondary">${r.reason ? 'Manual' : 'Desconocido'}</span>`;
 
       return `<tr>
-        <td>${when}</td>
-        <td>${student}</td>
-        <td>${guard}</td>
-        <td class="mono">${shift}</td>
+        <td>${escapeHtml(when)}</td>
+        <td>${escapeHtml(student)}</td>
+        <td>${escapeHtml(guard)}</td>
+        <td class="mono">${escapeHtml(shift)}</td>
         <td>${resultHtml}</td>
-        <td>${motivo}</td>
+        <td>${escapeHtml(motivo)}</td>
       </tr>`;
     }).join('');
 
@@ -723,16 +897,20 @@ document.getElementById('btnFilterHistory').addEventListener('click', loadHistor
 
 /* ========== Internal navigation: show/hide sections ========== */
 const sectionUsers = document.getElementById('sectionUsers');
+const sectionMetrics = document.getElementById('sectionMetrics');
+const sectionPresence = document.getElementById('sectionPresence');
 const sectionShifts = document.getElementById('sectionShifts');
 const sectionGuards = document.getElementById('sectionGuards');
 const sectionHistory = document.getElementById('sectionHistory');
 const btnNavUsers = document.getElementById('btnNavUsers');
+const btnNavMetrics = document.getElementById('btnNavMetrics');
+const btnNavPresence = document.getElementById('btnNavPresence');
 const btnNavShifts = document.getElementById('btnNavShifts');
 const btnNavGuards = document.getElementById('btnNavGuards');
 const btnNavHistory = document.getElementById('btnNavHistory');
 
 function clearNavStyles() {
-  [btnNavUsers, btnNavShifts, btnNavGuards, btnNavHistory].forEach(b => {
+  [btnNavUsers, btnNavMetrics, btnNavPresence, btnNavShifts, btnNavGuards, btnNavHistory].forEach(b => {
     b.classList.remove('btn-primary');
     b.classList.add('btn-outline-light');
   });
@@ -740,12 +918,24 @@ function clearNavStyles() {
 
 function showSection(name) {
   sectionUsers.classList.add('hidden');
+  sectionMetrics.classList.add('hidden');
+  sectionPresence.classList.add('hidden');
   sectionShifts.classList.add('hidden');
   sectionGuards.classList.add('hidden');
   sectionHistory.classList.add('hidden');
   clearNavStyles();
 
-  if (name === 'shifts') {
+  if (name === 'metrics') {
+    sectionMetrics.classList.remove('hidden');
+    btnNavMetrics.classList.add('btn-primary');
+    refreshMetricsSection();
+    history.replaceState(null, '', '#metrics');
+  } else if (name === 'presence') {
+    sectionPresence.classList.remove('hidden');
+    btnNavPresence.classList.add('btn-primary');
+    loadPresence();
+    history.replaceState(null, '', '#presence');
+  } else if (name === 'shifts') {
     sectionShifts.classList.remove('hidden');
     btnNavShifts.classList.add('btn-primary');
     loadGuardSelect(); refreshShiftsView();
@@ -769,6 +959,8 @@ function showSection(name) {
 }
 
 btnNavUsers.addEventListener('click', ()=> showSection('users'));
+btnNavMetrics.addEventListener('click', ()=> showSection('metrics'));
+btnNavPresence.addEventListener('click', ()=> showSection('presence'));
 btnNavShifts.addEventListener('click', ()=> showSection('shifts'));
 btnNavGuards.addEventListener('click', ()=> showSection('guards'));
 btnNavHistory.addEventListener('click', ()=> showSection('history'));
@@ -776,7 +968,9 @@ btnNavHistory.addEventListener('click', ()=> showSection('history'));
 /* On load: decide section by hash, load users by default */
 window.addEventListener('load', async () => {
   const h = location.hash.replace('#','');
-  if (h === 'shifts') showSection('shifts');
+  if (h === 'metrics') showSection('metrics');
+  else if (h === 'presence') showSection('presence');
+  else if (h === 'shifts') showSection('shifts');
   else if (h === 'guards') showSection('guards');
   else if (h === 'history') showSection('history');
   else showSection('users');

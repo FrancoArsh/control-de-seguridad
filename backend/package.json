@@ -8,13 +8,25 @@
   "scripts": {
     "dev": "ts-node-dev src/server.ts",
     "build": "tsc",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "test": "npm run build && node --test test/unit/*.test.mjs",
+    "test:integration": "npm run build && node --test test/integration.test.mjs",
+    "emulator:test": "firebase emulators:exec --only database --project control-de-seguridad-test \"npm run test:integration\"",
+    "emulator:ops": "firebase emulators:exec --only database --project control-de-seguridad-test \"node --test test/operations.test.mjs\"",
+    "emulator:recovery": "firebase emulators:exec --only database --project control-de-seguridad-test \"node --test test/recovery.test.mjs\"",
+    "load:test": "node scripts/load-test.mjs",
+    "backup:staging": "node scripts/backup-rtdb.mjs",
+    "retention:preview": "node scripts/retention-rtdb.mjs",
+    "retention:apply": "node scripts/retention-rtdb.mjs --apply=true",
+    "restore:preview": "node scripts/restore-rtdb.mjs",
+    "restore:apply": "node scripts/restore-rtdb.mjs --apply=true",
+    "staging:preflight": "node scripts/staging-preflight.mjs",
+    "credentials:recovery": "node scripts/credential-recovery.mjs"
   },
   "dependencies": {
     "axios": "^1.12.2",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.5",
-    "crypto": "^1.0.1",
     "dotenv": "^16.6.1",
     "express": "^4.21.2",
     "firebase-admin": "^12.7.0",
