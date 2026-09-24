@@ -1,0 +1,67 @@
+{
+  "ok": true,
+  "project": "control-de-seguridad-b4fa7",
+  "completedAt": "2026-09-24T02:24:22.472Z",
+  "evidence": [
+    {
+      "id": "demo-qr-001",
+      "email": "qr.demo.001@controlseguridad.test",
+      "login": 200,
+      "entry": 200,
+      "replay": 409,
+      "replayAfterCooldown": 409,
+      "renewedExit": 200,
+      "exitReplay": 409,
+      "finalInside": false,
+      "freshQr": true
+    },
+    {
+      "id": "demo-qr-002",
+      "email": "qr.demo.002@controlseguridad.test",
+      "login": 200,
+      "entry": 200,
+      "replay": 409,
+      "replayAfterCooldown": 409,
+      "renewedExit": 200,
+      "exitReplay": 409,
+      "finalInside": false,
+      "freshQr": true
+    },
+    {
+      "id": "demo-qr-003",
+      "email": "qr.demo.003@controlseguridad.test",
+      "login": 200,
+      "entry": 200,
+      "replay": 409,
+      "replayAfterCooldown": 409,
+      "renewedExit": 200,
+      "exitReplay": 409,
+      "finalInside": false,
+      "freshQr": true
+    },
+    {
+      "id": "demo-qr-004",
+      "email": "qr.demo.004@controlseguridad.test",
+      "login": 200,
+      "entry": 200,
+      "replay": 409,
+      "replayAfterCooldown": 409,
+      "renewedExit": 200,
+      "exitReplay": 409,
+      "finalInside": false,
+      "freshQr": true
+    },
+    {
+      "id": "demo-qr-005",
+      "email": "qr.demo.005@controlseguridad.test",
+      "login": 200,
+      "entry": 200,
+      "replay": 409,
+      "replayAfterCooldown": 409,
+      "renewedExit": 200,
+      "exitReplay": 409,
+      "finalInside": false,
+      "freshQr": true
+    }
+  ]
+}

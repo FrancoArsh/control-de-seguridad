@@ -19,6 +19,12 @@
     },
     "dynamicQrNonces": {
       ".indexOn": ["expiresAt"]
+    },
+    "portalSessions": {
+      ".indexOn": ["expiresAt"]
+    },
+    "accessTokens": {
+      ".indexOn": ["token"]
     }
   }
 }

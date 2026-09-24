@@ -10,6 +10,7 @@ import * as QRCode from "qrcode";
 import crypto from "crypto";
 import jwt, { SignOptions, Secret } from "jsonwebtoken";
 import bcrypt from "bcrypt";
+import { installPortal } from './portal';
 
 const svcEnv = process.env.SERVICE_ACCOUNT_JSON || process.env.SERVICE_ACCOUNT_JSON_BASE64 || null;
 
@@ -89,6 +90,7 @@ const SERVICE_ACCOUNT_PATH = process.env.GOOGLE_APPLICATION_CREDENTIALS || "./se
 const FIREBASE_DB_URL = process.env.FIREBASE_DATABASE_URL || "https://control-de-seguridad-b4fa7-default-rtdb.firebaseio.com/";
 
 let serviceAccount: any = null;
+const usingFirebaseEmulators = Boolean(process.env.FIREBASE_AUTH_EMULATOR_HOST || process.env.FIREBASE_DATABASE_EMULATOR_HOST);
 if (process.env.FIREBASE_SERVICE_ACCOUNT) {
   try {
     // En Railway pegaremos el contenido del JSON en esta variable
@@ -99,7 +101,7 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT) {
   }
 } 
 // 2. Si no hay variable, buscamos el archivo (Tu PC Local)
-else {
+else if (!usingFirebaseEmulators) {
   const localPath = path.resolve(__dirname, "../serviceAccountKey.json");
   if (fs.existsSync(localPath)) {
     try {
@@ -119,7 +121,7 @@ if (serviceAccount) {
   });
 } else {
   console.warn("⚠️ ADVERTENCIA: Iniciando SIN credenciales Admin. Algunas funciones fallarán.");
-  admin.initializeApp({ databaseURL: FIREBASE_DB_URL });
+  admin.initializeApp({ projectId: process.env.GCLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT, databaseURL: FIREBASE_DB_URL });
 }
 
 const db = admin.database();
@@ -154,6 +156,7 @@ app.use(cors({
    -------------------- */
 
 function requireGuard(req: Request, res: Response, next: NextFunction) {
+  if ((req as any).portal) return (req as any).portal.role === 'guard' ? next() : res.status(403).json({ ok: false, error: 'Sin permisos' });
   const auth = (req.headers["authorization"] || "") as string;
   const m = auth.match(/^Bearer\s+(.+)$/i);
   if (!m) return res.status(401).json({ ok: false, error: "no token" });
@@ -173,6 +176,7 @@ function requireGuard(req: Request, res: Response, next: NextFunction) {
    -------------------- */
 
 async function requireFirebaseAdmin(req: Request, res: Response, next: NextFunction) {
+  if ((req as any).portal) return (req as any).portal.role === 'admin' ? next() : res.status(403).json({ ok: false, error: 'Sin permisos' });
   try {
     const authHeader = (req.headers['authorization'] || '') as string;
     const m = authHeader.match(/^Bearer\s+(.+)$/i);
@@ -201,6 +205,7 @@ async function requireFirebaseAdmin(req: Request, res: Response, next: NextFunct
 }
 
 async function requireAdminOrGuard(req: Request, res: Response, next: NextFunction) {
+  if ((req as any).portal) return ['admin', 'guard'].includes((req as any).portal.role) ? next() : res.status(403).json({ ok: false, error: 'Sin permisos' });
   const authHeader = (req.headers["authorization"] || "") as string;
   const m = authHeader.match(/^Bearer\s+(.+)$/i);
   if (!m) return res.status(401).json({ ok: false, error: "no token" });
@@ -448,7 +453,10 @@ async function commitAccessTransition(userId: string, requestedType: string, ses
   let acceptedTransition: { accessType: AccessType; previousInside: boolean; newInside: boolean } | null = null;
   const now = Date.now();
 
-  const result = await stateRef.transaction((current: any) => {
+  // Keep the server value cached while the transaction can retry.
+  const keepState = () => {};
+  stateRef.on('value', keepState, () => {});
+  const result = await stateRef.once('value').then(() => stateRef.transaction((current: any) => {
     const state = current && typeof current === "object" ? current : {};
     const previousInside = state.inside === true;
 
@@ -479,7 +487,7 @@ async function commitAccessTransition(userId: string, requestedType: string, ses
       lastTimestamp: now,
       sessionId
     };
-  });
+  })).finally(() => stateRef.off('value', keepState));
 
   const committedTransition: { accessType: AccessType; previousInside: boolean; newInside: boolean } | null = acceptedTransition as {
     accessType: AccessType;
@@ -511,6 +519,9 @@ async function logAccess(params: {
   newInside?: boolean | null;
   validationMode?: "static" | "dynamic" | "manual" | null;
   qrVersion?: number | null;
+  request?: Request;
+  sede?: string | null;
+  tipoUsuario?: string | null;
 }) {
   try {
     const now = Date.now();
@@ -527,6 +538,13 @@ async function logAccess(params: {
       newInside: params.newInside ?? null,
       validationMode: params.validationMode || null,
       qrVersion: params.qrVersion || null,
+      sede: params.sede || null,
+      tipoUsuario: params.tipoUsuario || null,
+      validatedById: params.request ? ((params.request as any).portal?.uid || (params.request as any).guard?.id || (params.request as any).admin?.uid || null) : null,
+      validatedByRole: params.request ? ((params.request as any).portal?.role || ((params.request as any).guard ? "guard" : (params.request as any).admin ? "admin" : null)) : null,
+      validatedByName: params.request ? ((params.request as any).portal?.name || (params.request as any).guard?.name || (params.request as any).admin?.name || null) : null,
+      validatorIp: params.request?.ip || null,
+      validatorUserAgent: params.request?.headers["user-agent"] || null,
       timestamp: now
     };
     const pushRef = db.ref(`accessHistory`).push();
@@ -567,6 +585,7 @@ function sanitizeLimit(raw: any, defaultValue = 200, maxValue = 1000) {
   if (!Number.isFinite(parsed) || parsed <= 0) return defaultValue;
   return Math.min(Math.floor(parsed), maxValue);
 }
+
 
 async function logSecurityEvent(params: {
   type: string;
@@ -620,6 +639,17 @@ function clearGuardLoginFailures(req: Request, guardId: string) {
    Endpoints: Validate / Verify / History / User
    -------------------- */
 
+installPortal(app, db, async id => {
+  const dynamic = createDynamicQrToken(id);
+  return { token: dynamic.token, qrDataUrl: await genDynamicQrDataUrl(dynamic.token), expiresAt: dynamic.payload.exp };
+}, async (id, token) => {
+  const checked = verifyDynamicQrToken(token);
+  if (!checked.ok) return { renew: true };
+  if (checked.payload.sub !== id) throw new Error('QR owner mismatch');
+  const used = (await db.ref(`dynamicQrNonces/${checked.payload.nonce}`).get()).exists();
+  return { renew: used };
+});
+
 app.get("/health", (_req, res) => {
   return res.json({
     ok: true,
@@ -644,6 +674,8 @@ async function getCurrentPresence() {
       id,
       name: students[id]?.name || "Usuario sin nombre",
       role: students[id]?.role || "sin rol",
+      sede: students[id]?.sede || students[id]?.campus || "sin sede",
+      tipoUsuario: students[id]?.tipoUsuario || students[id]?.role || "sin tipo",
       inside: true,
       lastAccessType: states[id]?.lastAccessType || "entry",
       lastTimestamp: Number(states[id]?.lastTimestamp || 0),
@@ -654,12 +686,20 @@ async function getCurrentPresence() {
 
 app.get("/presence", requireAdminOrGuard, async (req, res) => {
   try {
-    const data = await getCurrentPresence();
+    let data = await getCurrentPresence();
+    const sede = String(req.query.sede || "").trim().toLowerCase();
+    const tipo = String(req.query.tipo || req.query.role || "").trim().toLowerCase();
+    const fecha = String(req.query.fecha || req.query.date || "").trim();
+    const estado = String(req.query.estado || "inside").trim().toLowerCase();
+    if (estado && estado !== "inside") data = [];
+    if (sede) data = data.filter(person => person.sede.toLowerCase() === sede);
+    if (tipo) data = data.filter(person => person.tipoUsuario.toLowerCase() === tipo || person.role.toLowerCase() === tipo);
+    if (fecha) data = data.filter(person => new Date(person.lastTimestamp).toISOString().slice(0, 10) === fecha);
     if ((req as any).admin) {
       await logAdminAction(req, {
         action: "presence.read",
         entityType: "access_state",
-        metadata: { count: data.length }
+        metadata: { count: data.length, filters: { sede, tipo, fecha, estado } }
       });
     }
     return res.json({ ok: true, generatedAt: Date.now(), count: data.length, data });
@@ -741,7 +781,7 @@ app.get("/admin/audit-log", requireFirebaseAdmin, async (_req, res) => {
 });
 
 // POST /validate
-app.post("/validate", async (req, res) => {
+app.post("/validate", requireAdminOrGuard, async (req, res) => {
   const rawToken = String(req.body?.qr || req.body?.qrToken || req.body?.token || "").trim();
   const sessionId = String(req.body?.sessionId || "default").trim() || "default";
   const requestedType = String(req.body?.type || "auto").trim().toLowerCase();
@@ -793,7 +833,21 @@ app.post("/validate", async (req, res) => {
     }
 
     const studentVal = studentSnap.val();
+    if (studentVal.active === false) return res.status(403).json({ ok: false, error: 'Usuario desactivado' });
     const studentName = studentVal.name || null;
+    const studentSede = studentVal.sede || studentVal.campus || null;
+    const studentTipo = studentVal.tipoUsuario || studentVal.role || null;
+
+    // El nonce se consume antes del cooldown para que un QR ya utilizado
+    // quede inhabilitado de inmediato y no pueda reutilizarse después.
+    if (dynamicPayload) {
+      const nonceAccepted = await markDynamicQrNonceUsed(dynamicPayload);
+      if (!nonceAccepted) {
+        await logAccess({ id: foundKey, studentUid: foundKey, name: studentName, token: rawToken, authorized: false, reason: "qr already used", sessionId, validationMode, qrVersion, request: req, sede: studentSede, tipoUsuario: studentTipo });
+        return res.status(409).json({ ok: false, error: "qr already used", reason: "qr already used" });
+      }
+    }
+
     const lastAccessTimestamp = Number(studentVal.lastAccessTimestamp || 0);
 
     if (now - lastAccessTimestamp < ACCESS_COOLDOWN_MS) {
@@ -809,7 +863,7 @@ app.post("/validate", async (req, res) => {
         reason: "cooldown active",
         sessionId,
         validationMode,
-        qrVersion
+        qrVersion, request: req, sede: studentSede, tipoUsuario: studentTipo
       });
 
       return res.status(403).json({
@@ -849,24 +903,6 @@ app.post("/validate", async (req, res) => {
       return res.status(409).json({ ok: false, error: transition.reason, reason: transition.reason });
     }
 
-    if (dynamicPayload) {
-      const nonceAccepted = await markDynamicQrNonceUsed(dynamicPayload);
-      if (!nonceAccepted) {
-        await logAccess({
-          id: foundKey,
-          studentUid: foundKey,
-          name: studentName,
-          token: rawToken,
-          authorized: false,
-          reason: "qr already used",
-          sessionId,
-          validationMode,
-          qrVersion
-        });
-        return res.status(409).json({ ok: false, error: "qr already used", reason: "qr already used" });
-      }
-    }
-
     await db.ref(`students/${foundKey}`).update({
       lastAccessTimestamp: now,
       lastAccessType: transition.accessType
@@ -898,7 +934,7 @@ app.post("/validate", async (req, res) => {
       previousInside: transition.previousInside,
       newInside: transition.newInside,
       validationMode,
-      qrVersion
+      qrVersion, request: req, sede: studentSede, tipoUsuario: studentTipo
     });
 
     return res.json({
@@ -930,6 +966,44 @@ app.post("/verify", async (_req, res) => {
 
 // GET /history
 // GET /history (mejorado) -> soporta ?limit=50 & ?guardId=... & ?shiftId=...
+/* Deferred reporting endpoints will be added in the reporting stage.
+  try {
+    const rows = await loadFilteredHistory(req.query);
+    const header = ["fecha_hora", "persona", "identificador", "sede", "tipo_usuario", "movimiento", "resultado", "motivo", "validado_por", "rol_validador", "ip_validador"];
+    const body = rows.map((row: any) => [
+      new Date(Number(row.timestamp || 0)).toISOString(), row.studentName, row.id, row.sede, row.tipoUsuario,
+      row.accessType, row.authorized ? "autorizado" : "rechazado", row.reason, row.validatedByName || row.validatedById,
+      row.validatedByRole, row.validatorIp
+    ].map(csvCell).join(","));
+    await logAdminAction(req, { action: "report.access.csv", entityType: "access_history", metadata: { count: rows.length, filters: req.query } });
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", 'attachment; filename="reporte-accesos.csv"');
+    return res.send("\ufeff" + [header.join(","), ...body].join("\n"));
+  } catch (err) {
+    console.error("GET /reports/access.csv error:", err);
+    return res.status(500).json({ ok: false, error: "No se pudo generar el reporte CSV." });
+  }
+  try {
+    const rows = await loadFilteredHistory(req.query);
+    await logAdminAction(req, { action: "report.access.pdf", entityType: "access_history", metadata: { count: rows.length, filters: req.query } });
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", 'attachment; filename="reporte-accesos.pdf"');
+    const document = new PDFDocument({ margin: 36, size: "A4" });
+    document.pipe(res);
+    document.fontSize(16).text("Reporte de control de accesos");
+    document.fontSize(9).text(`Generado: ${new Date().toLocaleString("es-CL")} | Registros: ${rows.length}`);
+    document.moveDown();
+    rows.forEach((row: any, index: number) => {
+      if (document.y > 760) document.addPage();
+      document.fontSize(8).text(`${index + 1}. ${new Date(Number(row.timestamp || 0)).toLocaleString("es-CL")} | ${row.studentName} (${row.id}) | ${row.sede} | ${row.tipoUsuario} | ${row.accessType || "-"} | ${row.authorized ? "AUTORIZADO" : "RECHAZADO"} | ${row.reason || "-"} | Valida: ${row.validatedByName || row.validatedById || "-"}`);
+    });
+    document.end();
+  } catch (err) {
+    console.error("GET /reports/access.pdf error:", err);
+    return res.status(500).json({ ok: false, error: "No se pudo generar el reporte PDF." });
+  }
+*/
+
 app.get("/history", requireFirebaseAdmin, async (req: Request, res: Response) => {
   try {
     const limit = sanitizeLimit(req.query.limit, 200, 1000);
@@ -2212,17 +2286,16 @@ app.post('/guards/create', requireFirebaseAdmin, async (req, res) => {
 
 const frontendPath = path.resolve(__dirname, "../..", "frontend");
 // Serve static files (css, js, images, html)
-app.use(express.static(frontendPath));
+app.use(express.static(frontendPath, { index: false }));
 
-// Root -> index.html
+// Portal institucional -> punto de entrada único de la aplicación.
 app.get('/', (req, res) => {
-  res.sendFile(path.join(frontendPath, "index.html"));
+  res.sendFile(path.join(frontendPath, "portal.html"));
 });
 
 // Optional: fallback for other non-API routes (helps SPA links) — only if you want it
 app.get(/^\/(?!guard|admin|history|verify|validate|users|api).*/, (req, res) => {
-  // if route doesn't start with an API prefix, send index.html so client-side routes work
-  res.sendFile(path.join(frontendPath, "index.html"));
+  res.sendFile(path.join(frontendPath, "portal.html"));
 });
 
 

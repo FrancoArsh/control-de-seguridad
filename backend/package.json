@@ -11,7 +11,7 @@
     "start": "node dist/server.js",
     "test": "npm run build && node --test test/unit/*.test.mjs",
     "test:integration": "npm run build && node --test test/integration.test.mjs",
-    "emulator:test": "firebase emulators:exec --only database --project control-de-seguridad-test \"npm run test:integration\"",
+    "emulator:test": "firebase emulators:exec --only database,auth --project control-de-seguridad-test \"npm run test:integration\"",
     "emulator:ops": "firebase emulators:exec --only database --project control-de-seguridad-test \"node --test test/operations.test.mjs\"",
     "emulator:recovery": "firebase emulators:exec --only database --project control-de-seguridad-test \"node --test test/recovery.test.mjs\"",
     "load:test": "node scripts/load-test.mjs",
