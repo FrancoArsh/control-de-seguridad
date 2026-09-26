@@ -24,6 +24,7 @@
     "credentials:recovery": "node scripts/credential-recovery.mjs"
   },
   "dependencies": {
+    "@types/pdfkit": "^0.13.9",
     "axios": "^1.12.2",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.5",
@@ -31,6 +32,7 @@
     "express": "^4.21.2",
     "firebase-admin": "^12.7.0",
     "jsonwebtoken": "^9.0.2",
+    "pdfkit": "^0.20.2",
     "qrcode": "^1.5.4"
   },
   "devDependencies": {

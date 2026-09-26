@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import admin from 'firebase-admin';
 import crypto from 'crypto';
 import axios from 'axios';
+import PDFDocument from 'pdfkit';
 
 type Profile = { uid: string; id: string; role: 'admin' | 'guard' | 'member'; name: string };
 const cookieName = 'control_session';
@@ -33,10 +34,13 @@ export function installPortal(app: Router, db: admin.database.Database, qr: (id:
   }
 
   const sessionCleanupTimer = setInterval(() => {
-    void db.ref('portalSessions').orderByChild('expiresAt').endAt(Date.now()).limitToFirst(500).get()
+    void db.ref('portalSessions').get()
       .then(snapshot => {
         const updates: Record<string, null> = {};
-        for (const key of Object.keys(snapshot.val() || {})) updates[`portalSessions/${key}`] = null;
+        const now = Date.now();
+        for (const [key, value] of Object.entries(snapshot.val() || {})) {
+          if (Number((value as any)?.expiresAt || 0) <= now) updates[`portalSessions/${key}`] = null;
+        }
         if (Object.keys(updates).length) return db.ref().update(updates);
       })
       .catch(error => console.error('portal session cleanup error:', error));
@@ -162,12 +166,67 @@ export function installPortal(app: Router, db: admin.database.Database, qr: (id:
       const [students, guards, admins] = await Promise.all([
         db.ref('students').get(), db.ref('guards').get(), db.ref('admins').get()
       ]);
+      const authEmail = async (uid: string | null | undefined, fallback: any = null) => {
+        if (fallback) return String(fallback);
+        if (!uid) return null;
+        try { return (await admin.auth().getUser(uid)).email || null; } catch { return null; }
+      };
       const data: any[] = [];
-      for (const [id, value] of Object.entries(students.val() || {})) data.push({ id, name: (value as any)?.name || id, role: 'member', active: (value as any)?.active !== false, uid: (value as any)?.authUid || null });
-      for (const [id, value] of Object.entries(guards.val() || {})) data.push({ id, name: (value as any)?.name || id, role: 'guard', active: (value as any)?.active !== false, uid: (value as any)?.authUid || null });
-      for (const [id, value] of Object.entries(admins.val() || {})) data.push({ id, name: (value as any)?.name || id, role: 'admin', active: (value as any)?.active !== false, uid: id });
+      for (const [id, value] of Object.entries(students.val() || {})) {
+        const row: any = value || {};
+        data.push({ id, name: row.name || id, sede: row.sede || '', tipoUsuario: row.tipoUsuario || row.role || '', email: await authEmail(row.authUid, row.email), role: 'member', active: row.active !== false, uid: row.authUid || null });
+      }
+      for (const [id, value] of Object.entries(guards.val() || {})) {
+        const row: any = value || {};
+        data.push({ id, name: row.name || id, sede: row.sede || '', tipoUsuario: row.tipoUsuario || row.role || '', email: await authEmail(row.authUid, row.email), role: 'guard', active: row.active !== false, uid: row.authUid || null });
+      }
+      for (const [id, value] of Object.entries(admins.val() || {})) {
+        const row: any = value || {};
+        data.push({ id, name: row.name || id, sede: row.sede || '', tipoUsuario: row.tipoUsuario || row.role || '', email: await authEmail(id, row.email), role: 'admin', active: row.active !== false, uid: id });
+      }
       return res.json({ ok: true, count: data.length, data });
     } catch { return res.status(503).json({ ok: false, error: 'No se pudo cargar la lista de usuarios.' }); }
+  });
+
+  router.get('/guards', async (req, res) => {
+    if ((req as any).portal?.role !== 'admin') return res.status(403).json({ ok: false, error: 'Solo administradores pueden consultar guardias.' });
+    try {
+      const [guardsSnap, shiftsSnap] = await Promise.all([db.ref('guards').get(), db.ref('guardShifts').get()]);
+      const shifts = Object.values(shiftsSnap.val() || {}) as any[];
+      const data = await Promise.all(Object.entries(guardsSnap.val() || {}).map(async ([id, value]: [string, any]) => {
+        const uid = value?.authUid || null;
+        let email = value?.email || null;
+        if (!email && uid) { try { email = (await admin.auth().getUser(uid)).email || null; } catch {} }
+        const activeShift = shifts.filter(shift => shift.guardId === id && shift.active !== false && !shift.endTimestamp)
+          .sort((a, b) => Number(b.startTimestamp || 0) - Number(a.startTimestamp || 0))[0] || null;
+        return { id, name: value?.name || id, email, active: value?.active !== false, lastLogin: value?.lastLogin || null, activeShift: activeShift ? { id: activeShift.id || null, startTimestamp: activeShift.startTimestamp || null } : null };
+      }));
+      return res.json({ ok: true, count: data.length, data });
+    } catch { return res.status(503).json({ ok: false, error: 'No se pudo cargar el panel de guardias.' }); }
+  });
+
+  router.get('/guard-report', async (req, res) => {
+    if ((req as any).portal?.role !== 'admin') return res.status(403).json({ ok: false, error: 'Solo administradores pueden consultar el historial de guardias.' });
+    try {
+      const [guardsSnap, shiftsSnap, historySnap] = await Promise.all([db.ref('guards').get(), db.ref('guardShifts').get(), db.ref('accessHistory').get()]);
+      const historyRows = Object.values(historySnap.val() || {}) as any[];
+      const shifts = Object.entries(shiftsSnap.val() || {}).map(([id, value]: [string, any]) => ({ id, ...(value || {}) }));
+      const data = Object.entries(guardsSnap.val() || {}).flatMap(([id, value]: [string, any]) => {
+        const guard = value || {};
+        const guardShifts = shifts.filter(shift => shift.guardId === id).sort((a, b) => Number(b.startTimestamp || 0) - Number(a.startTimestamp || 0));
+        const sourceRows = historyRows.filter(row => row.validatedById === guard.authUid || row.guardId === id);
+        const rows = guardShifts.length ? guardShifts : [{ id: null, startTimestamp: null, endTimestamp: null, active: false }];
+        return rows.map(shift => {
+          const start = Number(shift.startTimestamp || 0);
+          const end = Number(shift.endTimestamp || Date.now());
+          const accessRows = sourceRows.filter(row => Number(row.timestamp || 0) >= start && (!start || Number(row.timestamp || 0) <= end));
+          const approvedAccesses = accessRows.filter(row => row.authorized === true).length;
+          const rejectedAccesses = accessRows.filter(row => row.authorized === false).length;
+          return { id, name: guard.name || id, email: guard.email || null, active: guard.active !== false, shiftId: shift.id, startTimestamp: shift.startTimestamp || null, endTimestamp: shift.endTimestamp || null, shiftActive: shift.active !== false && !shift.endTimestamp, approvedAccesses, rejectedAccesses, totalAccesses: approvedAccesses + rejectedAccesses };
+        });
+      });
+      return res.json({ ok: true, generatedAt: Date.now(), data });
+    } catch { return res.status(503).json({ ok: false, error: 'No se pudo cargar el historial de guardias.' }); }
   });
 
   router.post('/users', async (req, res) => {
@@ -194,6 +253,30 @@ export function installPortal(app: Router, db: admin.database.Database, qr: (id:
     }
   });
 
+  router.patch('/users/:role/:id/profile', async (req, res) => {
+    const { role, id } = req.params;
+    const collections: Record<string, string> = { member: 'students', guard: 'guards', admin: 'admins' };
+    const { name, sede, tipoUsuario } = req.body || {};
+    if (!collections[role] || !id || /[.#$\[\]/]/.test(id) ||
+        typeof name !== 'string' || !name.trim() || name.length > 120 ||
+        typeof sede !== 'string' || sede.length > 120 ||
+        typeof tipoUsuario !== 'string' || tipoUsuario.length > 60) {
+      return res.status(400).json({ ok: false, error: 'Datos del perfil invalidos.' });
+    }
+    try {
+      const ref = db.ref(`${collections[role]}/${id}`);
+      if (!(await ref.get()).exists()) return res.status(404).json({ ok: false, error: 'Perfil no encontrado.' });
+      const auditKey = db.ref('adminAuditLog').push().key!;
+      await db.ref().update({
+        [`${collections[role]}/${id}/name`]: name.trim(),
+        [`${collections[role]}/${id}/sede`]: sede.trim(),
+        [`${collections[role]}/${id}/tipoUsuario`]: tipoUsuario.trim(),
+        [`adminAuditLog/${auditKey}`]: { actorId: (req as any).portal.uid, action: 'portal.profile.update', entityId: id, entityType: role, timestamp: Date.now() }
+      });
+      return res.json({ ok: true });
+    } catch { return res.status(503).json({ ok: false, error: 'No se pudo editar el perfil.' }); }
+  });
+
   router.patch('/users/:uid', async (req, res) => {
     const uid = String(req.params.uid || '').trim();
     if (!uid || !/^[A-Za-z0-9_-]{1,128}$/.test(uid)) return res.status(400).json({ ok: false, error: 'Identificador invalido.' });
@@ -201,10 +284,16 @@ export function installPortal(app: Router, db: admin.database.Database, qr: (id:
     if (typeof active !== 'boolean') return res.status(400).json({ ok: false, error: 'El estado active debe ser booleano.' });
     if (uid === (req as any).portal.uid && !active) return res.status(409).json({ ok: false, error: 'No puedes desactivar tu propia cuenta.' });
     try {
+      let mapping = (await db.ref(`portalProfiles/${uid}`).get()).val();
+      if (!mapping) {
+        for (const [role, collection] of [['admin', 'admins'], ['guard', 'guards'], ['member', 'students']]) {
+          if ((await db.ref(`${collection}/${uid}`).get()).exists()) { mapping = { role, id: uid }; break; }
+        }
+      }
+      if (!mapping?.id || !['admin', 'guard', 'member'].includes(mapping.role)) return res.status(409).json({ ok: false, error: 'Perfil no vinculado.' });
       const authUser = await admin.auth().updateUser(uid, { disabled: !active });
-      const mapping = (await db.ref(`portalProfiles/${uid}`).get()).val() || await profile(uid);
       if (mapping) {
-        await db.ref(`portalProfiles/${uid}`).update({ active });
+        await db.ref(`portalProfiles/${uid}`).set({ id: mapping.id, role: mapping.role, active });
         const collection = mapping.role === 'admin' ? 'admins' : mapping.role === 'guard' ? 'guards' : 'students';
         await db.ref(`${collection}/${mapping.id}`).update({ active });
       }
@@ -218,24 +307,52 @@ export function installPortal(app: Router, db: admin.database.Database, qr: (id:
 
   async function history(user: Profile) {
     const ref = db.ref('accessHistory');
-    const snapshot = user.role === 'member'
-      ? await ref.orderByChild('studentUid').equalTo(user.id).limitToLast(500).get()
-      : await ref.orderByChild('timestamp').limitToLast(500).get();
-    return Object.entries(snapshot.val() || {}).map(([key, row]: [string, any]) => ({
-      key, name: String(row.name || row.studentName || row.studentUid || row.id || 'Sin identificar'),
-      timestamp: Number(row.timestamp || 0), accessType: row.accessType || null,
-      authorized: row.authorized === true, reason: String(row.reason || ''),
-      sede: String(row.sede || row.campus || ''), tipoUsuario: String(row.tipoUsuario || row.role || ''),
-      validatedBy: String(row.validatedByName || row.validatedById || ''), validatedByRole: String(row.validatedByRole || '')
-    })).sort((a, b) => b.timestamp - a.timestamp);
+    // La base remota puede no tener aun los indices versionados localmente.
+    // Leemos el conjunto protegido por backend y aplicamos filtro/orden aqui.
+    const snapshot = await ref.get();
+    const [students, guards, admins] = await Promise.all([db.ref('students').get(), db.ref('guards').get(), db.ref('admins').get()]);
+    const people: Record<string, any> = { ...(students.val() || {}), ...(guards.val() || {}), ...(admins.val() || {}) };
+    const rows = Object.entries(snapshot.val() || {}).filter(([, row]: [string, any]) => {
+      if (user.role === 'member') return String(row.studentUid || row.id || '') === user.id;
+      if (user.role === 'guard') return row.validatedById === user.uid || row.guardId === user.id;
+      return true;
+    });
+    return rows.map(([key, row]: [string, any]) => {
+      const person = people[row.studentUid || row.id] || {};
+      return {
+        key, id: String(row.studentUid || row.id || ''), name: String(row.name || row.studentName || person.name || row.studentUid || row.id || 'Sin identificar'),
+        timestamp: Number(row.timestamp || 0), accessType: row.accessType || null,
+        authorized: row.authorized === true, reason: String(row.reason || (row.authorized === true ? 'ok' : 'Sin motivo registrado')),
+        sede: String(row.sede || row.campus || person.sede || person.campus || 'Sin sede'), tipoUsuario: String(row.tipoUsuario || row.role || person.tipoUsuario || person.role || 'Sin tipo'),
+        validatedBy: String(row.validatedByName || row.validatedById || 'Sin registrar'), validatedByRole: String(row.validatedByRole || '')
+      };
+    }).sort((a, b) => b.timestamp - a.timestamp).slice(0, 500);
   }
   router.get('/history', async (req, res) => {
     try { res.json({ ok: true, data: await history((req as any).portal) }); }
-    catch { res.status(503).json({ ok: false, error: 'No se pudo cargar el historial.' }); }
+    catch (error) { console.error('portal history error:', error); res.status(503).json({ ok: false, error: 'No se pudo cargar el historial.' }); }
+  });
+  router.get('/history.pdf', async (req, res) => {
+    try {
+      const rows = await history((req as any).portal);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', 'attachment; filename="historial-accesos.pdf"');
+      const document = new PDFDocument({ size: 'A4', margin: 36 });
+      document.pipe(res);
+      document.fontSize(16).text('Historial de control de accesos');
+      document.fontSize(9).text(`Generado: ${new Date().toLocaleString('es-CL')} | Registros: ${rows.length}`);
+      document.moveDown();
+      rows.forEach((row, index) => {
+        if (document.y > 760) document.addPage();
+        document.fontSize(8).text(`${index + 1}. ${new Date(row.timestamp).toLocaleString('es-CL')} | ${row.name} (${row.id}) | ${row.accessType || '-'} | ${row.authorized ? 'AUTORIZADO' : 'RECHAZADO'} | ${row.reason} | Valido: ${row.validatedBy}`);
+      });
+      document.end();
+    } catch (error) { console.error('portal history PDF error:', error); res.status(503).json({ ok: false, error: 'No se pudo exportar el historial.' }); }
   });
   router.get('/summary', async (req, res) => {
     try {
       const user: Profile = (req as any).portal;
+      if (user.role === 'guard') return res.json({ ok: true });
       if (user.role === 'member') {
         const state = (await db.ref(`accessState/${user.id}`).get()).val();
         return res.json({ ok: true, inside: state?.inside === true, lastTimestamp: state?.lastTimestamp || null });
@@ -244,11 +361,62 @@ export function installPortal(app: Router, db: admin.database.Database, qr: (id:
       res.json({ ok: true, insideCount: Object.values(snapshot).filter((v: any) => v.inside === true).length });
     } catch { res.status(503).json({ ok: false, error: 'No se pudo cargar el resumen.' }); }
   });
+  router.get('/guard/shift', async (req, res) => {
+    const user: Profile = (req as any).portal;
+    if (user.role !== 'guard') return res.status(403).json({ ok: false, error: 'Solo guardias pueden consultar su turno.' });
+    try {
+      const snapshot = await db.ref('guardShifts').get();
+      const active = Object.entries(snapshot.val() || {})
+        .map(([id, value]: [string, any]) => ({ id, ...(value || {}) }))
+        .filter(value => value.guardId === user.id && value.active !== false && !value.endTimestamp)
+        .sort((a, b) => Number(b.startTimestamp || 0) - Number(a.startTimestamp || 0))[0] || null;
+      res.json({ ok: true, active: Boolean(active), shift: active });
+    } catch { res.status(503).json({ ok: false, error: 'No se pudo consultar el turno.' }); }
+  });
+  router.post('/guard/shift/start', async (req, res) => {
+    const user: Profile = (req as any).portal;
+    if (user.role !== 'guard') return res.status(403).json({ ok: false, error: 'Solo guardias pueden iniciar turno.' });
+    try {
+      const snapshot = await db.ref('guardShifts').get();
+      const active = Object.entries(snapshot.val() || {}).some(([, value]: [string, any]) => value?.guardId === user.id && value?.active !== false && !value?.endTimestamp);
+      if (active) return res.status(409).json({ ok: false, error: 'Ya tienes un turno activo.' });
+      const ref = db.ref('guardShifts').push();
+      const startTimestamp = Date.now();
+      await ref.set({ guardId: user.id, startTimestamp, active: true, createdBy: user.uid, notes: String(req.body?.notes || '').slice(0, 500) || null });
+      res.status(201).json({ ok: true, active: true, shift: { id: ref.key, guardId: user.id, startTimestamp, active: true } });
+    } catch { res.status(503).json({ ok: false, error: 'No se pudo iniciar el turno.' }); }
+  });
+  router.post('/guard/shift/end', async (req, res) => {
+    const user: Profile = (req as any).portal;
+    if (user.role !== 'guard') return res.status(403).json({ ok: false, error: 'Solo guardias pueden finalizar turno.' });
+    try {
+      const snapshot = await db.ref('guardShifts').get();
+      const active = Object.entries(snapshot.val() || {})
+        .map(([id, value]: [string, any]) => ({ id, ...(value || {}) }))
+        .filter(value => value.guardId === user.id && value.active !== false && !value.endTimestamp)
+        .sort((a, b) => Number(b.startTimestamp || 0) - Number(a.startTimestamp || 0))[0];
+      if (!active) return res.status(404).json({ ok: false, error: 'No tienes un turno activo.' });
+      const endTimestamp = Date.now();
+      await db.ref(`guardShifts/${active.id}`).update({ endTimestamp, active: false, endedBy: user.uid, notes: String(req.body?.notes || active.notes || '').slice(0, 500) || null });
+      res.json({ ok: true, active: false, shift: { ...active, endTimestamp, active: false } });
+    } catch { res.status(503).json({ ok: false, error: 'No se pudo finalizar el turno.' }); }
+  });
   router.get('/qr', async (req, res) => {
     const user: Profile = (req as any).portal;
     if (user.role !== 'member') return res.status(403).json({ ok: false, error: 'Esta opcion corresponde a usuarios con credencial.' });
     try { res.json({ ok: true, ...await qr(user.id) }); }
     catch { res.status(503).json({ ok: false, error: 'No se pudo generar el QR.' }); }
+  });
+  router.get('/student-qr/:id', async (req, res) => {
+    const user: Profile = (req as any).portal;
+    if (user.role !== 'admin') return res.status(403).json({ ok: false, error: 'Solo administradores pueden consultar credenciales.' });
+    const id = String(req.params.id || '').trim();
+    if (!id || /[.#$\[\]/]/.test(id)) return res.status(400).json({ ok: false, error: 'Identificador invalido.' });
+    try {
+      const student = (await db.ref(`students/${id}`).get()).val();
+      if (!student) return res.status(404).json({ ok: false, error: 'Estudiante no encontrado.' });
+      res.json({ ok: true, id, name: student.name || id, ...await qr(id) });
+    } catch { res.status(503).json({ ok: false, error: 'No se pudo generar el QR.' }); }
   });
   router.post('/qr/status', async (req, res) => {
     const user: Profile = (req as any).portal;

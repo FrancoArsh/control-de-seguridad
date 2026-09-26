@@ -34,10 +34,15 @@ La entrada `/` presenta el portal con correo y contraseña. La sesión se guarda
 ## Vistas implementadas
 
 - Inicio: resumen según rol.
-- Escanear QR: disponible para administradores y guardias.
-- Personas dentro: disponible para administradores y guardias.
-- Historial: visible para administradores y guardias; los miembros solo ven sus propios eventos.
+- Escanear QR: disponible solo para guardias con turno activo.
+- Personas dentro: disponible solo para administradores.
+- Historial: administradores ven todos los eventos; guardias solo ven sus propias validaciones; los miembros solo ven sus eventos.
 - Mi código QR: disponible para miembros.
-- Usuarios: disponible para administradores; permite alta y desactivacion de cuentas.
+- Usuarios: disponible para administradores; permite alta, edición, consulta, activación, desactivación y QR de estudiantes.
+- Reportes: CSV para usuarios autorizados y PDF para administradores.
 
-La validación `POST /validate` requiere una sesión de administrador o guardia. El login antiguo de guardia permanece disponible para compatibilidad, pero el portal es la entrada recomendada.
+La validación `POST /validate` requiere una sesión administrativa o una sesión de guardia con turno activo. El login antiguo de guardia permanece disponible para compatibilidad, pero el portal es la entrada recomendada.
+
+## Riesgos de dependencias
+
+`npm audit --omit=dev` identifica vulnerabilidades moderadas transitivas en `qs` y `uuid`. La actualización forzada implicaría cambios mayores en `firebase-admin`; se debe planificar una actualización controlada y repetir las pruebas antes del despliegue productivo.

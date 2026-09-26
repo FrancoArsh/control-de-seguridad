@@ -1,10 +1,12 @@
 /* Portal navigation is driven by the server-authorized profile. */
 const $ = id => document.getElementById(id);
 let user, scanner, scanning = false, busy = false, viewVersion = 0, qrTimer;
-let presence = [], history = [];
-const links = { inicio: ['Inicio', '⌂'], scan: ['Escanear QR', '▣'], presence: ['Personas dentro', '◉'], history: ['Historial', '≡'], qr: ['Mi código QR', '▦'], users: ['Usuarios', '♙'] };
-const views = { inicio: 'home', scan: 'scan', presence: 'presence', history: 'history', qr: 'qr', users: 'users' };
-const allowed = () => user?.role === 'member' ? ['inicio', 'qr', 'history'] : ['inicio', 'scan', 'presence', 'history', ...(user?.role === 'admin' ? ['users'] : [])];
+let presence = [], history = [], guards = [];
+let filteredHistory = [];
+let editingUser;
+const links = { inicio: ['Inicio', '⌂'], scan: ['Escanear QR', '▣'], presence: ['Personas dentro', '◉'], history: ['Historial', '≡'], qr: ['Mi código QR', '▦'], users: ['Usuarios', '♙'], guards: ['Guardias', '♜'] };
+const views = { inicio: 'home', scan: 'scan', presence: 'presence', history: 'history', qr: 'qr', users: 'users', guards: 'guards' };
+const allowed = () => user?.role === 'member' ? ['inicio', 'qr', 'history'] : user?.role === 'guard' ? ['inicio', 'scan', 'history'] : ['inicio', 'presence', 'history', 'users', 'guards'];
 const date = value => value ? new Date(value).toLocaleString('es-CL') : 'Sin registros';
 const escape = value => String(value ?? '').replace(/[&<>"']/g, v => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[v]);
 
@@ -27,14 +29,19 @@ async function showLogin() {
   $('workspace').hidden = true; $('login').hidden = false; $('boot').hidden = true;
   $('password').value = ''; $('my-qr').removeAttribute('src');
   $('presence-rows').replaceChildren(); $('history-rows').replaceChildren();
-  history = []; presence = [];
+  history = []; presence = []; guards = [];
 }
 function navLink(key) { return `<a href="#${key}"><span class="nav-symbol" aria-hidden="true">${links[key][1]}</span>${links[key][0]}</a>`; }
 async function enter(profile) {
   user = profile;
   $('login').hidden = true; $('workspace').hidden = false; $('boot').hidden = true;
+  $('workspace').dataset.role = user.role;
+  $('guard-shift-panel').hidden = user.role !== 'guard';
+  $('report-actions').hidden = false;
+  $('download-pdf').hidden = user.role !== 'admin';
   $('username').textContent = user.name;
-  $('role').textContent = { admin: 'Administración', guard: 'Guardia', member: 'Comunidad' }[user.role];
+  $('role').textContent = { admin: 'Administración', guard: 'Guardia operativa', member: 'Comunidad' }[user.role];
+  $('portal-type').textContent = user.role === 'guard' ? 'Portal de Guardia' : user.role === 'admin' ? 'Panel de Administración' : 'Portal de acceso';
   $('nav').innerHTML = allowed().map(navLink).join('');
   $('shortcuts').innerHTML = allowed().filter(k => k !== 'inicio').map(navLink).join('');
   await navigate();
@@ -60,7 +67,9 @@ async function navigate() {
       if (version !== viewVersion) return;
       $('stats').innerHTML = user.role === 'member'
         ? stat('Mi estado', result.inside ? 'Dentro' : 'Fuera') + stat('Último movimiento', date(result.lastTimestamp))
+        : user.role === 'guard' ? stat('Guardia', user.name) + stat('Identificador', user.id)
         : stat('Personas dentro', result.insideCount) + stat('Perfil activo', $('role').textContent) + stat('Consulta realizada', new Date().toLocaleTimeString('es-CL'));
+      if (user.role === 'guard') await loadGuardShift();
     } else if (key === 'presence') {
       $('presence-rows').replaceChildren();
       const result = await api('/presence');
@@ -102,12 +111,31 @@ async function navigate() {
       const result = await api('/portal/users');
       if (version !== viewVersion) return;
       renderUsers(result.data);
+    } else if (key === 'guards') {
+      const result = await api('/portal/guard-report');
+      if (version !== viewVersion) return;
+      guards = result.data; renderGuards();
     }
     if (version === viewVersion) $('status').textContent = '';
   } catch (error) { if (version === viewVersion) $('status').textContent = error.message; }
 }
 function renderUsers(rows) {
-  $('user-rows').innerHTML = rows.map(v => `<tr><td>${escape(v.name)}</td><td>${escape(v.email || '—')}</td><td>${escape(v.role)}</td><td><span class="badge ${v.active ? '' : 'bad'}">${v.active ? 'Activo' : 'Desactivado'}</span></td><td>${v.uid ? `<button type="button" data-user-uid="${escape(v.uid)}" data-user-active="${v.active ? 'false' : 'true'}">${v.active ? 'Desactivar' : 'Activar'}</button>` : '—'}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">No hay usuarios registrados.</td></tr>';
+  $('user-rows').innerHTML = rows.map(v => `<tr><td>${escape(v.name)}</td><td>${escape(v.email || 'Sin correo asociado')}</td><td>${escape(v.role)}</td><td><span class="badge ${v.active ? '' : 'bad'}">${v.active ? 'Activo' : 'Desactivado'}</span></td><td>${v.role === 'member' ? `<button type="button" data-qr-id="${escape(v.id)}">Ver QR</button> ` : ''}${v.uid ? `<button type="button" title="${v.active ? 'Impide el acceso de esta cuenta' : 'Permite nuevamente el acceso de esta cuenta'}" data-user-uid="${escape(v.uid)}" data-user-active="${v.active ? 'false' : 'true'}">${v.active ? 'Desactivar' : 'Activar'}</button>` : 'Sin cuenta'}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">No hay usuarios registrados.</td></tr>';
+  Array.from($('user-rows').rows).forEach((tr, index) => {
+    if (!rows[index]) return;
+    const button = document.createElement('button'); button.textContent = 'Editar'; button.type = 'button';
+    button.onclick = () => {
+      editingUser = rows[index];
+      $('edit-name').value = editingUser.name; $('edit-sede').value = editingUser.sede || ''; $('edit-type').value = editingUser.tipoUsuario || '';
+      $('edit-status').textContent = ''; $('edit-dialog').showModal();
+    };
+    tr.lastElementChild.append(button);
+  });
+  document.querySelectorAll('[data-qr-id]').forEach(button => button.addEventListener('click', async () => {
+    button.disabled = true;
+    try { const result = await api(`/portal/student-qr/${encodeURIComponent(button.dataset.qrId)}`); const popup = window.open('', '_blank', 'noopener,noreferrer'); if (popup) popup.document.write(`<title>QR de ${escape(result.name)}</title><h1>${escape(result.name)}</h1><img src="${result.qrDataUrl}" alt="Código QR de acceso" width="320" height="320"><p>Válido hasta ${escape(date(result.expiresAt))}</p>`); }
+    catch (error) { $('status').textContent = error.message; } finally { button.disabled = false; }
+  }));
   document.querySelectorAll('[data-user-uid]').forEach(button => button.addEventListener('click', async () => {
     button.disabled = true;
     try { await api(`/portal/users/${encodeURIComponent(button.dataset.userUid)}`, { active: button.dataset.userActive === 'true' }, 'PATCH'); await navigate(); }
@@ -115,17 +143,33 @@ function renderUsers(rows) {
   }));
 }
 function renderPresence() {
-  const filter = $('presence-filter').value.toLowerCase();
-  const rows = presence.filter(v => `${v.name} ${v.id}`.toLowerCase().includes(filter));
+  const filter = $('presence-filter').value.toLowerCase(), sede = $('presence-sede').value.toLowerCase(), role = $('presence-role').value.toLowerCase(), day = $('presence-date').value;
+  const localDay = timestamp => { const d = new Date(timestamp); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
+  const rows = presence.filter(v => `${v.name} ${v.id}`.toLowerCase().includes(filter) && (!sede || String(v.sede || '').toLowerCase().includes(sede)) && (!role || `${v.role} ${v.tipoUsuario}`.toLowerCase().includes(role)) && (!day || localDay(v.lastTimestamp) === day));
   $('presence-count').textContent = `${rows.length} de ${presence.length} personas dentro`;
-  $('presence-rows').innerHTML = rows.map(v => `<tr><td>${escape(v.name)}</td><td>${escape(v.id)}</td><td>${escape(v.role)}</td><td>${escape(date(v.lastTimestamp))}</td></tr>`).join('') || '<tr><td colspan="4" class="empty">No hay personas que mostrar.</td></tr>';
+  $('presence-rows').innerHTML = rows.map(v => `<tr><td>${escape(v.name)}</td><td>${escape(v.id)}</td><td>${escape(v.sede || 'Sin sede')}</td><td>${escape(v.tipoUsuario || v.role || 'Sin tipo')}</td><td>${v.lastAccessType === 'entry' ? 'Entrada' : 'Salida'}</td><td>${escape(date(v.lastTimestamp))}</td></tr>`).join('') || '<tr><td colspan="6" class="empty">No hay personas que mostrar.</td></tr>';
 }
 function renderHistory() {
-  const filter = $('history-filter').value.toLowerCase(), day = $('history-date').value, outcome = $('history-result').value;
+  const filter = $('history-filter').value.toLowerCase(), day = $('history-date').value, sede = $('history-sede').value.toLowerCase(), role = $('history-role').value.toLowerCase(), outcome = $('history-result').value;
   const localDay = timestamp => { const d = new Date(timestamp); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
-  const rows = history.filter(v => v.name.toLowerCase().includes(filter) && (!day || localDay(v.timestamp) === day) && (outcome === 'all' || v.authorized === (outcome === 'yes')));
+  const rows = history.filter(v => `${v.name} ${v.id}`.toLowerCase().includes(filter) && (!day || localDay(v.timestamp) === day) && (!sede || String(v.sede || '').toLowerCase().includes(sede)) && (!role || `${v.tipoUsuario} ${v.validatedByRole}`.toLowerCase().includes(role)) && (outcome === 'all' || v.authorized === (outcome === 'yes')));
   $('history-count').textContent = `${rows.length} registros · Consulta de hasta 500 eventos recientes`;
-  $('history-rows').innerHTML = rows.map(v => `<tr><td>${escape(date(v.timestamp))}</td><td>${escape(v.name)}</td><td>${v.accessType === 'entry' ? 'Entrada' : v.accessType === 'exit' ? 'Salida' : '—'}</td><td><span class="badge ${v.authorized ? '' : 'bad'}">${v.authorized ? 'Autorizado' : 'Rechazado'}</span></td><td>${escape(v.reason === 'ok' ? 'Acceso válido' : v.reason)}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">No hay movimientos para estos filtros.</td></tr>';
+  filteredHistory = rows;
+  $('history-rows').innerHTML = rows.map(v => `<tr><td>${escape(date(v.timestamp))}</td><td>${escape(v.name)}<small class="subvalue">${escape(v.id)}</small></td><td>${escape(v.sede || 'Sin sede')}</td><td>${escape(v.tipoUsuario || 'Sin tipo')}</td><td>${v.accessType === 'entry' ? 'Entrada' : v.accessType === 'exit' ? 'Salida' : '—'}</td><td><span class="badge ${v.authorized ? '' : 'bad'}">${v.authorized ? 'Autorizado' : 'Rechazado'}</span></td><td>${escape(v.reason === 'ok' ? 'Acceso válido' : v.reason)}</td><td>${escape(v.validatedBy || 'Sin registrar')}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">No hay movimientos para estos filtros.</td></tr>';
+}
+function renderGuards() {
+  $('guard-rows').innerHTML = guards.map(v => `<tr><td>${escape(v.name)}<small class="subvalue">${escape(v.id)}</small></td><td>${escape(v.email || 'Sin correo asociado')}</td><td>${v.shiftActive ? '<span class="badge">Activo</span>' : v.shiftId ? '<span class="badge bad">Finalizado</span>' : 'Sin turno'}</td><td>${escape(date(v.startTimestamp))}</td><td>${escape(date(v.endTimestamp))}</td><td>${escape(v.approvedAccesses)}</td><td>${escape(v.rejectedAccesses)}</td><td>${escape(v.totalAccesses)}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">No hay guardias registrados.</td></tr>';
+}
+async function loadGuardShift() {
+  const panel = $('guard-shift-panel');
+  panel.hidden = false;
+  try {
+    const result = await api('/portal/guard/shift');
+    $('shift-status').textContent = result.active ? `Turno activo desde ${date(result.shift.startTimestamp)}. Puedes validar accesos.` : 'Sin turno activo. Inicia turno para validar accesos.';
+    $('start-shift').disabled = result.active;
+    $('end-shift').disabled = !result.active;
+    $('shift-title').textContent = result.active ? 'Turno activo' : 'Turno cerrado';
+  } catch (error) { $('shift-status').textContent = error.message; }
 }
 async function validate(value) {
   if (busy || !user) return;
@@ -136,7 +180,8 @@ async function validate(value) {
     let token = value.trim();
     if (/^https?:\/\//.test(token)) { const url = new URL(token); token = url.searchParams.get('token') || url.searchParams.get('qr') || token; }
     const result = await api('/validate', { qr: token, type: $('direction').value });
-    $('scan-result').dataset.ok = 'true'; $('scan-result').textContent = `${result.message}: ${result.name || result.studentUid}`;
+    const movement = result.accessType === 'exit' ? 'Salida' : 'Entrada';
+    $('scan-result').dataset.ok = 'true'; $('scan-result').textContent = `${movement} autorizada: ${result.name || result.studentUid}`;
     $('qr-value').value = '';
   } catch (error) { $('scan-result').dataset.ok = 'false'; $('scan-result').textContent = error.message; }
   finally { busy = false; $('validate-button').disabled = false; }
@@ -166,13 +211,57 @@ $('logout').onclick = async () => {
 };
 $('menu').onclick = () => { const open = $('sidebar').classList.toggle('open'); $('menu').setAttribute('aria-expanded', String(open)); };
 $('refresh').onclick = navigate; $('renew-qr').onclick = navigate;
-$('presence-filter').oninput = renderPresence;
-for (const id of ['history-filter','history-date','history-result']) $(id).oninput = renderHistory;
+$('edit-cancel').onclick = () => $('edit-dialog').close();
+$('edit-form').onsubmit = async event => {
+  event.preventDefault();
+  const submit = event.submitter; submit.disabled = true;
+  try {
+    await api(`/portal/users/${editingUser.role}/${encodeURIComponent(editingUser.id)}/profile`, { name: $('edit-name').value, sede: $('edit-sede').value, tipoUsuario: $('edit-type').value }, 'PATCH');
+    $('edit-dialog').close(); await navigate();
+  } catch (error) { $('edit-status').textContent = error.message; }
+  finally { submit.disabled = false; }
+};
+$('download-csv').onclick = async () => {
+  try {
+    const { historyCsv } = await import('/js/report.mjs');
+    const url = URL.createObjectURL(new Blob([historyCsv(filteredHistory)], { type: 'text/csv;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url; link.download = 'historial-accesos.csv'; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch { $('status').textContent = 'No se pudo exportar el historial.'; }
+};
+$('download-pdf').onclick = async () => {
+  try {
+    const response = await fetch('/portal/history.pdf', { credentials: 'same-origin', headers: { 'X-Portal-Request': '1' }, cache: 'no-store' });
+    if (!response.ok) throw new Error('No se pudo exportar el PDF.');
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement('a'); link.href = url; link.download = 'historial-accesos.pdf'; link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (error) { $('status').textContent = error.message; }
+};
+for (const id of ['presence-filter','presence-sede','presence-role','presence-date']) $(id).oninput = renderPresence;
+for (const id of ['history-filter','history-date','history-sede','history-role','history-result']) $(id).oninput = renderHistory;
+document.querySelectorAll('.direction-choice').forEach(button => button.onclick = () => {
+  const direction = button.dataset.direction;
+  $('direction').value = direction;
+  document.querySelectorAll('.direction-choice').forEach(item => { const active = item === button; item.classList.toggle('active', active); item.setAttribute('aria-pressed', String(active)); });
+  $('validate-button').textContent = direction === 'exit' ? 'Validar salida' : 'Validar entrada';
+});
 $('scan-form').onsubmit = event => { event.preventDefault(); validate($('qr-value').value); };
 $('user-form').onsubmit = async event => {
   event.preventDefault(); $('user-form-status').textContent = 'Creando usuario…';
   try { await api('/portal/users', { name: $('user-name').value.trim(), email: $('user-email').value.trim(), password: $('user-password').value, role: $('user-role').value }); $('user-form').reset(); $('user-form-status').textContent = 'Usuario creado correctamente.'; await navigate(); }
   catch (error) { $('user-form-status').textContent = error.message; }
+};
+$('start-shift').onclick = async () => {
+  $('start-shift').disabled = true;
+  try { await api('/portal/guard/shift/start', {}); await loadGuardShift(); }
+  catch (error) { $('shift-status').textContent = error.message; $('start-shift').disabled = false; }
+};
+$('end-shift').onclick = async () => {
+  $('end-shift').disabled = true;
+  try { await api('/portal/guard/shift/end', {}); await loadGuardShift(); }
+  catch (error) { $('shift-status').textContent = error.message; $('end-shift').disabled = false; }
 };
 $('stop-camera').onclick = stopCamera;
 $('start-camera').onclick = async () => {

@@ -134,7 +134,7 @@ test("valida concurrencia y deja una sola persona dentro", async () => {
   assert.equal(state.lastAccessType, "entry");
 });
 
-test("expone presencia protegida y permite consultarla a un guardia autenticado", async () => {
+test("impide consultar presencia a un guardia autenticado", async () => {
   const login = await request("/guard/login", {
     method: "POST",
     body: JSON.stringify({ guardId: "guard-001", pin: "1234" })
@@ -144,9 +144,7 @@ test("expone presencia protegida y permite consultarla a un guardia autenticado"
   const presence = await request("/presence", {
     headers: { authorization: `Bearer ${login.body.token}` }
   });
-  assert.equal(presence.response.status, 200);
-  assert.equal(presence.body.count, 1);
-  assert.equal(presence.body.data[0].id, "stu-001");
+  assert.ok([401, 403].includes(presence.response.status));
 });
 
 test("valida concurrencia de salida y conserva un unico estado final", async () => {
@@ -176,6 +174,8 @@ test("autentica el portal y aplica la sesion y el rol de administrador", async (
   const me = await portalRequest("/portal/me");
   assert.equal(me.response.status, 200);
   assert.equal(me.body.user.role, "admin");
+  const presence = await portalRequest('/presence');
+  assert.equal(presence.response.status, 200);
 
   const users = await portalRequest("/portal/users");
   assert.equal(users.response.status, 200);

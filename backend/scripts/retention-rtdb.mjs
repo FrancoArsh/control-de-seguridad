@@ -17,12 +17,11 @@ const { app, db } = createDatabaseClient("retention");
 const preview = {};
 
 async function collectExpired(collection) {
-  const snapshot = await db.ref(collection)
-    .orderByChild("timestamp")
-    .endAt(cutoff)
-    .limitToFirst(batchSize)
-    .once("value");
-  return Object.keys(snapshot.val() || {});
+  const snapshot = await db.ref(collection).once("value");
+  return Object.entries(snapshot.val() || {})
+    .filter(([, value]) => Number(value?.timestamp || 0) > 0 && Number(value.timestamp) <= cutoff)
+    .slice(0, batchSize)
+    .map(([key]) => key);
 }
 
 async function deleteExpired(collection) {
@@ -38,12 +37,11 @@ async function deleteExpired(collection) {
 }
 
 try {
-  const expiredNonces = await db.ref("dynamicQrNonces")
-    .orderByChild("expiresAt")
-    .endAt(Date.now())
-    .limitToFirst(batchSize)
-    .once("value");
-  const nonceKeys = Object.keys(expiredNonces.val() || {});
+  const nonceSnapshot = await db.ref("dynamicQrNonces").once("value");
+  const nonceKeys = Object.entries(nonceSnapshot.val() || {})
+    .filter(([, value]) => Number(value?.expiresAt || 0) <= Date.now())
+    .slice(0, batchSize)
+    .map(([key]) => key);
   preview.dynamicQrNonces = nonceKeys.length;
 
   for (const collection of eventCollections) {

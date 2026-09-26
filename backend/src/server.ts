@@ -389,12 +389,8 @@ async function markDynamicQrNonceUsed(payload: DynamicQrPayload) {
 async function cleanupExpiredQrNonces() {
   try {
     const now = Date.now();
-    const snap = await db.ref("dynamicQrNonces")
-      .orderByChild("expiresAt")
-      .endAt(now)
-      .limitToFirst(500)
-      .once("value");
-    const expired = snap.val() || {};
+    const snap = await db.ref("dynamicQrNonces").once("value");
+    const expired = Object.fromEntries(Object.entries(snap.val() || {}).filter(([, value]: [string, any]) => Number(value?.expiresAt || 0) <= now).slice(0, 500));
     const updates: Record<string, null> = {};
     for (const nonce of Object.keys(expired)) {
       updates[`dynamicQrNonces/${nonce}`] = null;
@@ -684,7 +680,7 @@ async function getCurrentPresence() {
     .sort((a, b) => b.lastTimestamp - a.lastTimestamp);
 }
 
-app.get("/presence", requireAdminOrGuard, async (req, res) => {
+app.get("/presence", requireFirebaseAdmin, async (req, res) => {
   try {
     let data = await getCurrentPresence();
     const sede = String(req.query.sede || "").trim().toLowerCase();
@@ -786,6 +782,13 @@ app.post("/validate", requireAdminOrGuard, async (req, res) => {
   const sessionId = String(req.body?.sessionId || "default").trim() || "default";
   const requestedType = String(req.body?.type || "auto").trim().toLowerCase();
   const now = Date.now();
+
+  if ((req as any).portal?.role === 'guard') {
+    const guardId = (req as any).portal.id;
+    const shifts = (await db.ref('guardShifts').get()).val() || {};
+    const onShift = Object.values(shifts).some((value: any) => value?.guardId === guardId && value?.active !== false && !value?.endTimestamp);
+    if (!onShift) return res.status(403).json({ ok: false, error: 'Debes iniciar tu turno antes de validar accesos.', reason: 'GUARD_NOT_ON_SHIFT' });
+  }
 
   if (!rawToken) {
     await logAccess({ token: rawToken, authorized: false, reason: "token required", sessionId });
