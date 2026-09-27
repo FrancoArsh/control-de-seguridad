@@ -4,6 +4,7 @@ dist/
 .env
 backend/serviceAccountKey.json
 backend/serviceAccount.staging.json
+backend/.env.staging
 .vscode/
 .DS_Store
 backend/serviceAccountKey.json

@@ -37,7 +37,7 @@ if (svcEnv) {
 }
 // --- END ---
 
-dotenv.config();
+dotenv.config({ path: process.env.ENV_FILE || ".env" });
 
 
 console.log('DEBUG cwd:', process.cwd());
@@ -102,7 +102,7 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT) {
 } 
 // 2. Si no hay variable, buscamos el archivo (Tu PC Local)
 else if (!usingFirebaseEmulators) {
-  const localPath = path.resolve(__dirname, "../serviceAccountKey.json");
+  const localPath = path.resolve(__dirname, "..", SERVICE_ACCOUNT_PATH);
   if (fs.existsSync(localPath)) {
     try {
       serviceAccount = JSON.parse(fs.readFileSync(localPath, "utf8"));
