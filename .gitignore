@@ -3,6 +3,7 @@ npm-debug.log
 dist/
 .env
 backend/serviceAccountKey.json
+backend/serviceAccount.staging.json
 .vscode/
 .DS_Store
 backend/serviceAccountKey.json
