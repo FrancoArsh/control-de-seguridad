@@ -11,6 +11,8 @@ import crypto from "crypto";
 import jwt, { SignOptions, Secret } from "jsonwebtoken";
 import bcrypt from "bcrypt";
 import { installPortal } from './portal';
+import { validateStaging } from './environment';
+import { startShift } from './shifts';
 
 const svcEnv = process.env.SERVICE_ACCOUNT_JSON || process.env.SERVICE_ACCOUNT_JSON_BASE64 || null;
 
@@ -114,6 +116,7 @@ else if (!usingFirebaseEmulators) {
 }
 
 // 3. Iniciamos Firebase
+validateStaging(process.env, serviceAccount);
 if (serviceAccount) {
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
@@ -155,7 +158,7 @@ app.use(cors({
    Middlewares
    -------------------- */
 
-function requireGuard(req: Request, res: Response, next: NextFunction) {
+async function requireGuard(req: Request, res: Response, next: NextFunction) {
   if ((req as any).portal) return (req as any).portal.role === 'guard' ? next() : res.status(403).json({ ok: false, error: 'Sin permisos' });
   const auth = (req.headers["authorization"] || "") as string;
   const m = auth.match(/^Bearer\s+(.+)$/i);
@@ -164,11 +167,25 @@ function requireGuard(req: Request, res: Response, next: NextFunction) {
   try {
     const decoded: any = jwt.verify(token, JWT_SECRET);
     if (!decoded?.guardId) return res.status(401).json({ ok: false, error: "invalid token" });
+    if (!await guardEnabled(decoded.guardId)) return res.status(403).json({ ok: false, error: 'Guardia desactivado' });
     (req as any).guard = { id: decoded.guardId, name: decoded.name };
     return next();
   } catch (e) {
     return res.status(401).json({ ok: false, error: "invalid token" });
   }
+}
+
+async function guardEnabled(id: string) {
+  if (typeof id !== 'string' || !id || /[.#$\[\]/]/.test(id)) return false;
+  const value = (await db.ref(`guards/${id}`).get()).val();
+  if (!value || value.active === false) return false;
+  const uid = value.authUid || value.uid;
+  if (uid) {
+    const identity = await admin.auth().getUser(uid);
+    const mapping = (await db.ref(`portalProfiles/${uid}`).get()).val();
+    if (identity.disabled || mapping?.active === false) return false;
+  }
+  return true;
 }
 
 /* --------------------
@@ -183,13 +200,13 @@ async function requireFirebaseAdmin(req: Request, res: Response, next: NextFunct
     if (!m) return res.status(401).json({ ok:false, error: 'no token' });
     const idToken = m[1];
     // verifica token con Firebase Admin SDK
-    const decoded = await admin.auth().verifyIdToken(idToken);
+    const decoded = await admin.auth().verifyIdToken(idToken, true);
     const uid = decoded.uid;
     // verifica que el uid sea admin en la RTDB
     const snap = await db.ref(`admins/${uid}`).once('value');
     if (!snap.exists()) return res.status(403).json({ ok:false, error: 'not admin' });
     const profile = snap.val();
-    if (profile.role !== 'admin') return res.status(403).json({ ok:false, error:'not admin role' });
+    if (profile.role !== 'admin' || profile.active === false) return res.status(403).json({ ok:false, error:'not admin role' });
 
     // adjunta info útil
     (req as any).admin = { uid, name: profile.name || null, email: profile.email || null };
@@ -214,6 +231,7 @@ async function requireAdminOrGuard(req: Request, res: Response, next: NextFuncti
   try {
     const decoded: any = jwt.verify(token, JWT_SECRET);
     if (decoded?.guardId) {
+      if (!await guardEnabled(decoded.guardId)) return res.status(403).json({ ok: false, error: 'Guardia desactivado' });
       (req as any).guard = { id: decoded.guardId, name: decoded.name || null };
       return next();
     }
@@ -222,12 +240,12 @@ async function requireAdminOrGuard(req: Request, res: Response, next: NextFuncti
   }
 
   try {
-    const decoded = await admin.auth().verifyIdToken(token);
+    const decoded = await admin.auth().verifyIdToken(token, true);
     const uid = decoded.uid;
     const snap = await db.ref(`admins/${uid}`).once("value");
     if (!snap.exists()) return res.status(403).json({ ok: false, error: "not admin" });
     const profile = snap.val();
-    if (profile.role !== "admin") return res.status(403).json({ ok: false, error: "not admin role" });
+    if (profile.role !== "admin" || profile.active === false) return res.status(403).json({ ok: false, error: "not admin role" });
     (req as any).admin = { uid, name: profile.name || null, email: profile.email || null };
     return next();
   } catch (err: any) {
@@ -354,8 +372,10 @@ function verifyDynamicQrToken(token: string): { ok: true; payload: DynamicQrPayl
       payload.v !== 2 ||
       payload.purpose !== "access" ||
       typeof payload.sub !== "string" ||
+      !payload.sub || /[.#$\[\]/]/.test(payload.sub) ||
       payload.sub.length > 160 ||
       typeof payload.nonce !== "string" ||
+      !/^[a-f0-9]{32}$/.test(payload.nonce) ||
       payload.nonce.length < 16 ||
       !Number.isFinite(issuedAt) ||
       !Number.isFinite(expiresAt) ||
@@ -363,7 +383,8 @@ function verifyDynamicQrToken(token: string): { ok: true; payload: DynamicQrPayl
     ) {
       return { ok: false, reason: "invalid qr payload" };
     }
-    if (Date.now() > expiresAt) {
+    if (issuedAt > Date.now() || expiresAt - issuedAt > QR_TTL_MS) return { ok: false, reason: 'invalid qr lifetime' };
+    if (Date.now() >= expiresAt) {
       return { ok: false, reason: "qr expired" };
     }
     return { ok: true, payload };
@@ -525,7 +546,7 @@ async function logAccess(params: {
       id: params.id || params.studentUid || null,
       studentUid: params.studentUid || params.id || null,
       name: params.name || null,
-      token: params.token || null,
+      tokenFingerprint: params.token ? crypto.createHash('sha256').update(params.token).digest('hex') : null,
       authorized: !!params.authorized,
       reason: params.reason || null,
       sessionId: params.sessionId || null,
@@ -777,25 +798,31 @@ app.get("/admin/audit-log", requireFirebaseAdmin, async (_req, res) => {
 });
 
 // POST /validate
-app.post("/validate", requireAdminOrGuard, async (req, res) => {
+app.post("/validate", async (req, res, next) => {
+  await requireAdminOrGuard(req, res, next);
+  if (res.headersSent) await logAccess({ request: req, authorized: false, reason: 'validator not authorized' });
+}, async (req, res) => {
   const rawToken = String(req.body?.qr || req.body?.qrToken || req.body?.token || "").trim();
   const sessionId = String(req.body?.sessionId || "default").trim() || "default";
   const requestedType = String(req.body?.type || "auto").trim().toLowerCase();
   const now = Date.now();
 
-  if ((req as any).portal?.role === 'guard') {
-    const guardId = (req as any).portal.id;
+  try {
+  if ((req as any).guard) {
+    const guardId = (req as any).guard.id;
     const shifts = (await db.ref('guardShifts').get()).val() || {};
     const onShift = Object.values(shifts).some((value: any) => value?.guardId === guardId && value?.active !== false && !value?.endTimestamp);
-    if (!onShift) return res.status(403).json({ ok: false, error: 'Debes iniciar tu turno antes de validar accesos.', reason: 'GUARD_NOT_ON_SHIFT' });
+    if (!onShift) {
+      await logAccess({ request: req, authorized: false, reason: 'GUARD_NOT_ON_SHIFT', sessionId });
+      return res.status(403).json({ ok: false, error: 'Debes iniciar tu turno antes de validar accesos.', reason: 'GUARD_NOT_ON_SHIFT' });
+    }
   }
 
   if (!rawToken) {
-    await logAccess({ token: rawToken, authorized: false, reason: "token required", sessionId });
+    await logAccess({ request: req, authorized: false, reason: "token required", sessionId });
     return res.status(400).json({ ok: false, error: "token required" });
   }
 
-  try {
     let foundKey: string | null = null;
     let tokenData: any = null;
     let validationMode: "static" | "dynamic" = "static";
@@ -813,6 +840,7 @@ app.post("/validate", requireAdminOrGuard, async (req, res) => {
         token: rawToken,
         authorized: false,
         reason: dynamicQr.reason,
+        request: req,
         sessionId,
         validationMode: "dynamic",
         qrVersion: 2
@@ -825,18 +853,21 @@ app.post("/validate", requireAdminOrGuard, async (req, res) => {
     }
 
     if (!foundKey) {
-      await logAccess({ token: rawToken, authorized: false, reason: "token not found", sessionId, validationMode, qrVersion });
+      await logAccess({ request: req, authorized: false, reason: "token not found", sessionId, validationMode, qrVersion });
       return res.status(404).json({ ok: false, error: "token not found", reason: "token not found" });
     }
 
     const studentSnap = await db.ref(`students/${foundKey}`).once("value");
     if (!studentSnap.exists()) {
-      await logAccess({ id: foundKey, studentUid: foundKey, token: rawToken, authorized: false, reason: "user not found", sessionId, validationMode, qrVersion });
+      await logAccess({ request: req, id: foundKey, studentUid: foundKey, authorized: false, reason: "user not found", sessionId, validationMode, qrVersion });
       return res.status(404).json({ ok: false, error: "user not found", reason: "user not found" });
     }
 
     const studentVal = studentSnap.val();
-    if (studentVal.active === false) return res.status(403).json({ ok: false, error: 'Usuario desactivado' });
+    if (studentVal.active === false) {
+      await logAccess({ request: req, id: foundKey, authorized: false, reason: 'user disabled', sessionId });
+      return res.status(403).json({ ok: false, error: 'Usuario desactivado' });
+    }
     const studentName = studentVal.name || null;
     const studentSede = studentVal.sede || studentVal.campus || null;
     const studentTipo = studentVal.tipoUsuario || studentVal.role || null;
@@ -878,11 +909,11 @@ app.post("/validate", requireAdminOrGuard, async (req, res) => {
 
     if (validationMode === "static") {
       if (tokenData?.used) {
-        await logAccess({ id: foundKey, studentUid: foundKey, token: rawToken, authorized: false, reason: "token already used", sessionId, validationMode, qrVersion });
+        await logAccess({ request: req, id: foundKey, studentUid: foundKey, authorized: false, reason: "token already used", sessionId, validationMode, qrVersion });
         return res.status(400).json({ ok: false, error: "token already used", reason: "token already used" });
       }
       if (tokenData?.expiresAt && now > Number(tokenData.expiresAt)) {
-        await logAccess({ id: foundKey, studentUid: foundKey, token: rawToken, authorized: false, reason: "token expired", sessionId, validationMode, qrVersion });
+        await logAccess({ request: req, id: foundKey, studentUid: foundKey, authorized: false, reason: "token expired", sessionId, validationMode, qrVersion });
         return res.status(400).json({ ok: false, error: "token expired", reason: "token expired" });
       }
     }
@@ -896,6 +927,7 @@ app.post("/validate", requireAdminOrGuard, async (req, res) => {
         token: rawToken,
         authorized: false,
         reason: transition.reason,
+        request: req,
         sessionId,
         validationMode,
         qrVersion
@@ -953,7 +985,7 @@ app.post("/validate", requireAdminOrGuard, async (req, res) => {
 
   } catch (err) {
     console.error("validate error:", err);
-    await logAccess({ token: rawToken, authorized: false, reason: "server error", sessionId });
+    await logAccess({ request: req, authorized: false, reason: "server error", sessionId });
     return res.status(500).json({ ok: false, error: "server error" });
   }
 });
@@ -1352,6 +1384,7 @@ app.post('/guard/login', async (req, res) => {
       return res.status(401).json({ ok:false, error: 'invalid credentials' });
     }
     const g: any = gSnap.val();
+    if (!await guardEnabled(guardId)) return res.status(403).json({ ok: false, error: 'Guardia desactivado' });
 
     // ----- validar PIN permanente -----
     if (g.pinHash) {
@@ -1451,6 +1484,24 @@ app.post('/guard/login', async (req, res) => {
 });
 
 
+
+// All start routes share the same transactional uniqueness constraint.
+async function startShiftRoute(req: Request, res: Response) {
+  try {
+    const guardId = (req as any).guard?.id || String(req.body?.guardId || '');
+    if (!await guardEnabled(guardId)) return res.status(403).json({ ok: false, error: 'Guardia no habilitado' });
+    const shift = await startShift(db, guardId, (req as any).admin?.uid || guardId, String(req.body?.notes || ''));
+    if (!shift) return res.status(409).json({ ok: false, error: 'already active' });
+    return res.json({ ok: true, shiftId: shift.id, startTimestamp: shift.startTimestamp });
+  } catch { return res.status(503).json({ ok: false, error: 'No se pudo iniciar turno' }); }
+}
+app.post('/guard/shift/start', requireGuard, startShiftRoute);
+app.post('/admin/guard/shift/start', requireFirebaseAdmin, startShiftRoute);
+// The old manual endpoint bypassed the QR nonce checks. Retire it explicitly.
+app.post('/guard/authorize', requireGuard, async (req, res) => {
+  await logAccess({ request: req, authorized: false, reason: 'legacy authorization retired' });
+  res.status(410).json({ ok: false, error: 'Utilice /validate con un QR vigente.' });
+});
 
 // POST /guard/shift/start  (requireGuard)
 app.post("/guard/shift/start", requireGuard, async (req, res) => {

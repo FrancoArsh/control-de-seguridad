@@ -110,6 +110,7 @@ test("valida concurrencia y deja una sola persona dentro", async () => {
     body: JSON.stringify({ guardId: "guard-001", pin: "1234" })
   });
   assert.equal(login.body.ok, true);
+  await request('/guard/shift/start', { method: 'POST', headers: { authorization: `Bearer ${login.body.token}` }, body: '{}' });
   const authorization = { authorization: `Bearer ${login.body.token}` };
   const results = await Promise.all([
     request("/validate", {

@@ -3,6 +3,7 @@ import admin from 'firebase-admin';
 import crypto from 'crypto';
 import axios from 'axios';
 import PDFDocument from 'pdfkit';
+import { startShift } from './shifts';
 
 type Profile = { uid: string; id: string; role: 'admin' | 'guard' | 'member'; name: string };
 const cookieName = 'control_session';
@@ -377,13 +378,9 @@ export function installPortal(app: Router, db: admin.database.Database, qr: (id:
     const user: Profile = (req as any).portal;
     if (user.role !== 'guard') return res.status(403).json({ ok: false, error: 'Solo guardias pueden iniciar turno.' });
     try {
-      const snapshot = await db.ref('guardShifts').get();
-      const active = Object.entries(snapshot.val() || {}).some(([, value]: [string, any]) => value?.guardId === user.id && value?.active !== false && !value?.endTimestamp);
-      if (active) return res.status(409).json({ ok: false, error: 'Ya tienes un turno activo.' });
-      const ref = db.ref('guardShifts').push();
-      const startTimestamp = Date.now();
-      await ref.set({ guardId: user.id, startTimestamp, active: true, createdBy: user.uid, notes: String(req.body?.notes || '').slice(0, 500) || null });
-      res.status(201).json({ ok: true, active: true, shift: { id: ref.key, guardId: user.id, startTimestamp, active: true } });
+      const shift = await startShift(db, user.id, user.uid, String(req.body?.notes || ''));
+      if (!shift) return res.status(409).json({ ok: false, error: 'Ya tienes un turno activo.' });
+      res.status(201).json({ ok: true, active: true, shift });
     } catch { res.status(503).json({ ok: false, error: 'No se pudo iniciar el turno.' }); }
   });
   router.post('/guard/shift/end', async (req, res) => {
