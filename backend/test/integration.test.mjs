@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import bcrypt from "bcrypt";
+import crypto from 'node:crypto';
 import { initializeApp, deleteApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { getDatabase } from "firebase-admin/database";
@@ -84,6 +85,7 @@ before(async () => {
     env: {
       ...process.env,
       NODE_ENV: "test",
+      ALLOW_LEGACY_STATIC_QR: 'true',
       PORT: String(port),
       ADMIN_SECRET: "integration-admin-secret",
       JWT_SECRET: "integration-jwt-secret",
@@ -102,6 +104,122 @@ before(async () => {
 after(async () => {
   if (server) server.kill();
   if (seedApp) await deleteApp(seedApp);
+});
+
+async function loginAs(email) {
+  const result = await request('/portal/login', { method: 'POST', headers: { 'x-portal-request': '1' }, body: JSON.stringify({ email, password: 'IntegrationPass123!' }) });
+  assert.equal(result.response.status, 200, JSON.stringify(result.body));
+  return { cookie: result.response.headers.get('set-cookie').split(';')[0], 'x-portal-request': '1' };
+}
+
+function signedQr(id, options = {}) {
+  const payload = { v: 2, purpose: 'access', sub: id, iat: Date.now(), exp: Date.now() + 60000, nonce: crypto.randomBytes(16).toString('hex'), ...options };
+  const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  return `${encoded}.${crypto.createHmac('sha256', 'integration-qr-secret').update(encoded).digest('base64url')}`;
+}
+
+async function validate(headers, qr, type = 'entry') {
+  return request('/validate', { method: 'POST', headers, body: JSON.stringify({ qr, type }) });
+}
+
+test('QR dinamico: concurrencia, replay, salida y auditoria', async () => {
+  const db = getDatabase(seedApp);
+  await db.ref('students/dynamic-person').set({ name: 'Persona QR', active: true });
+  const headers = await loginAs('guard.integration@example.test');
+  await request('/portal/guard/shift/start', { method: 'POST', headers, body: '{}' });
+  const qr = signedQr('dynamic-person');
+  const results = await Promise.all(Array.from({ length: 6 }, () => validate(headers, qr)));
+  assert.equal(results.filter(r => r.body.ok === true).length, 1);
+  assert.equal(results.filter(r => r.body.reason === 'qr already used').length, 5);
+  assert.equal((await db.ref('accessState/dynamic-person').get()).val().inside, true);
+  const replay = await validate(headers, qr);
+  assert.equal(replay.response.status, 409);
+  await db.ref('accessState/dynamic-person/lastTimestamp').set(0);
+  await db.ref('students/dynamic-person/lastAccessTimestamp').set(0);
+  const exits = await Promise.all(Array.from({ length: 6 }, () => validate(headers, signedQr('dynamic-person'), 'exit')));
+  assert.equal(exits.filter(r => r.body.ok === true).length, 1);
+  assert.equal((await db.ref('accessState/dynamic-person').get()).val().inside, false);
+  const history = Object.values((await db.ref('accessHistory').get()).val() || {}).filter(row => row.id === 'dynamic-person');
+  assert.equal(history.filter(row => row.authorized).length, 2);
+  for (const row of history) {
+    assert.ok(row.validatedById);
+    assert.equal(row.validatedByRole, 'guard');
+    assert.ok(row.timestamp && row.reason);
+    assert.equal(row.token, undefined);
+  }
+});
+
+test('rechaza QR vencido, adulterado, futuro, desactivado y peticion sin token', async () => {
+  const headers = await loginAs('guard.integration@example.test');
+  const now = Date.now();
+  const expired = signedQr('dynamic-person', { iat: now - 60001, exp: now - 1 });
+  assert.equal((await validate(headers, expired)).body.reason, 'qr expired');
+  assert.equal((await validate(headers, signedQr('dynamic-person') + 'x')).body.reason, 'invalid qr signature');
+  assert.equal((await validate(headers, signedQr('dynamic-person', { iat: now + 30000, exp: now + 60000 }))).body.reason, 'invalid qr lifetime');
+  assert.equal((await validate(headers, '')).response.status, 400);
+  const db = getDatabase(seedApp);
+  await db.ref('students/dynamic-person/active').set(false);
+  assert.equal((await validate(headers, signedQr('dynamic-person'))).response.status, 403);
+  await db.ref('students/dynamic-person/active').set(true);
+  const rows = Object.values((await db.ref('accessHistory').get()).val() || {});
+  for (const reason of ['qr expired', 'invalid qr signature', 'invalid qr lifetime', 'token required', 'user disabled']) {
+    const row = rows.find(r => r.reason === reason);
+    assert.ok(row, reason);
+    assert.ok(row.validatedById, reason);
+    assert.equal(row.authorized, false);
+  }
+});
+
+test('inicio de turno unico incluso mezclando portal y JWT; fuera de turno y desactivacion', async () => {
+  const db = getDatabase(seedApp);
+  const headers = await loginAs('guard.integration@example.test');
+  const jwtLogin = await request('/guard/login', { method: 'POST', body: JSON.stringify({ guardId: 'guard-001', pin: '1234' }) });
+  assert.equal(jwtLogin.body.ok, true);
+  const bearer = { authorization: `Bearer ${jwtLogin.body.token}` };
+  await request('/portal/guard/shift/end', { method: 'POST', headers, body: '{}' });
+  for (const h of [headers, bearer]) assert.equal((await validate(h, signedQr('dynamic-person'))).body.reason, 'GUARD_NOT_ON_SHIFT');
+  const results = await Promise.all(Array.from({ length: 8 }, (_, i) => request(i % 2 ? '/portal/guard/shift/start' : '/guard/shift/start', { method: 'POST', headers: i % 2 ? headers : bearer, body: '{}' })));
+  assert.equal(results.filter(r => r.body.ok === true).length, 1);
+  const shifts = Object.values((await db.ref('guardShifts').get()).val() || {});
+  assert.equal(shifts.filter(s => s.guardId === 'guard-001' && s.active !== false && !s.endTimestamp).length, 1);
+  assert.equal((await request('/guard/authorize', { method: 'POST', headers: bearer, body: '{}' })).response.status, 410);
+  await db.ref('guards/guard-001/active').set(false);
+  for (const h of [headers, bearer]) assert.ok([401, 403].includes((await validate(h, signedQr('dynamic-person'))).response.status));
+  assert.equal((await request('/guard/login', { method: 'POST', body: JSON.stringify({ guardId: 'guard-001', pin: '1234' }) })).response.status, 403);
+  await db.ref('guards/guard-001/active').set(true);
+  const uid = (await db.ref('guards/guard-001/authUid').get()).val();
+  await getAuth(seedApp).updateUser(uid, { disabled: true });
+  assert.equal((await validate(bearer, signedQr('dynamic-person'))).response.status, 403);
+  await getAuth(seedApp).updateUser(uid, { disabled: false });
+});
+
+test('estudiante y profesor: aislamiento de QR, historial, administracion y renovacion', async () => {
+  const db = getDatabase(seedApp);
+  for (const kind of ['student', 'teacher']) {
+    const email = `${kind}.roles@example.test`;
+    const user = await getAuth(seedApp).createUser({ email, password: 'IntegrationPass123!' });
+    await db.ref(`students/${user.uid}`).set({ name: kind, active: true, tipoUsuario: kind });
+    const headers = await loginAs(email);
+    for (const route of ['/portal/users', '/portal/guards', '/presence', '/portal/student-qr/stu-001']) {
+      assert.equal((await request(route, { headers })).response.status, 403, route);
+    }
+    assert.equal((await request(`/portal/users/member/${user.uid}/profile`, { method: 'PATCH', headers, body: JSON.stringify({ name: 'Forbidden' }) })).response.status, 403);
+    assert.equal((await validate(headers, signedQr(user.uid))).response.status, 403);
+    const qr = await request('/portal/qr', { headers });
+    assert.equal(qr.response.status, 200);
+    assert.equal(JSON.parse(Buffer.from(qr.body.token.split('.')[0], 'base64url')).sub, user.uid);
+    const guard = await loginAs('guard.integration@example.test');
+    assert.equal((await validate(guard, qr.body.token)).response.status, 200);
+    const status = await request('/portal/qr/status', { method: 'POST', headers, body: JSON.stringify({ token: qr.body.token }) });
+    assert.equal(status.body.renew, true);
+    const renewed = await request('/portal/qr', { headers });
+    assert.notEqual(renewed.body.token, qr.body.token);
+    const history = await request('/portal/history', { headers });
+    assert.equal(history.response.status, 200);
+    assert.ok(history.body.data.every(row => row.id === user.uid));
+    await getAuth(seedApp).updateUser(user.uid, { disabled: true });
+    assert.equal((await request('/portal/qr', { headers })).response.status, 401);
+  }
 });
 
 test("valida concurrencia y deja una sola persona dentro", async () => {

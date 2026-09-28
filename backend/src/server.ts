@@ -14,38 +14,11 @@ import { installPortal } from './portal';
 import { validateStaging } from './environment';
 import { startShift } from './shifts';
 
-const svcEnv = process.env.SERVICE_ACCOUNT_JSON || process.env.SERVICE_ACCOUNT_JSON_BASE64 || null;
-
-if (svcEnv) {
-  try {
-    const outPath = path.resolve(__dirname, '../serviceAccountKey.json');
-    // Si enviaron base64 (opcional), detectarlo:
-    let content = svcEnv;
-    // si parece base64 (opcional), decodificar
-    if (/^[A-Za-z0-9+/=\\s]+$/.test(svcEnv) && svcEnv.length > 200 && !svcEnv.trim().startsWith('{')) {
-      // intenta decodificar base64
-      try {
-        content = Buffer.from(svcEnv, 'base64').toString('utf8');
-      } catch (e) {
-        // no era base64, usan JSON directo
-      }
-    }
-    // Escribe el archivo (sobrescribe si ya existe)
-    fs.writeFileSync(outPath, typeof content === 'string' ? content : JSON.stringify(content), { encoding: 'utf8', flag: 'w' });
-    console.log('[INIT] Service account file written to', outPath);
-  } catch (e) {
-    console.error('[INIT] Could not write service account from env:', e);
-  }
-}
-// --- END ---
-
 dotenv.config({ path: process.env.ENV_FILE || ".env" });
 
 
-console.log('DEBUG cwd:', process.cwd());
-console.log('DEBUG __dirname:', __dirname);
-console.log('DEBUG FIREBASE_DATABASE_URL:', process.env.FIREBASE_DATABASE_URL);
-console.log('DEBUG serviceAccount path:', path.resolve(__dirname, '../serviceAccountKey.json'));
+const serviceAccountEnv = process.env.FIREBASE_SERVICE_ACCOUNT || process.env.SERVICE_ACCOUNT_JSON ||
+  (process.env.SERVICE_ACCOUNT_JSON_BASE64 ? Buffer.from(process.env.SERVICE_ACCOUNT_JSON_BASE64, 'base64').toString('utf8') : null);
 
 
 /* --------------------
@@ -93,13 +66,13 @@ const FIREBASE_DB_URL = process.env.FIREBASE_DATABASE_URL || "https://control-de
 
 let serviceAccount: any = null;
 const usingFirebaseEmulators = Boolean(process.env.FIREBASE_AUTH_EMULATOR_HOST || process.env.FIREBASE_DATABASE_EMULATOR_HOST);
-if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+if (serviceAccountEnv) {
   try {
     // En Railway pegaremos el contenido del JSON en esta variable
-    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    serviceAccount = JSON.parse(serviceAccountEnv);
     console.log("✅ [NUBE] Cargando credenciales desde variable de entorno.");
   } catch (e) {
-    console.error("❌ Error leyendo la variable FIREBASE_SERVICE_ACCOUNT", e);
+    throw new Error('Invalid Firebase service account configuration');
   }
 } 
 // 2. Si no hay variable, buscamos el archivo (Tu PC Local)
@@ -167,8 +140,8 @@ async function requireGuard(req: Request, res: Response, next: NextFunction) {
   try {
     const decoded: any = jwt.verify(token, JWT_SECRET);
     if (!decoded?.guardId) return res.status(401).json({ ok: false, error: "invalid token" });
-    if (!await guardEnabled(decoded.guardId)) return res.status(403).json({ ok: false, error: 'Guardia desactivado' });
     (req as any).guard = { id: decoded.guardId, name: decoded.name };
+    if (!await guardEnabled(decoded.guardId)) return res.status(403).json({ ok: false, error: 'Guardia desactivado' });
     return next();
   } catch (e) {
     return res.status(401).json({ ok: false, error: "invalid token" });
@@ -203,7 +176,9 @@ async function requireFirebaseAdmin(req: Request, res: Response, next: NextFunct
     const decoded = await admin.auth().verifyIdToken(idToken, true);
     const uid = decoded.uid;
     // verifica que el uid sea admin en la RTDB
-    const snap = await db.ref(`admins/${uid}`).once('value');
+    const mapping = (await db.ref(`portalProfiles/${uid}`).get()).val();
+    if (mapping && (mapping.active === false || mapping.role !== 'admin')) return res.status(403).json({ ok: false, error: 'not admin' });
+    const snap = await db.ref(`admins/${mapping?.id || uid}`).once('value');
     if (!snap.exists()) return res.status(403).json({ ok:false, error: 'not admin' });
     const profile = snap.val();
     if (profile.role !== 'admin' || profile.active === false) return res.status(403).json({ ok:false, error:'not admin role' });
@@ -231,8 +206,8 @@ async function requireAdminOrGuard(req: Request, res: Response, next: NextFuncti
   try {
     const decoded: any = jwt.verify(token, JWT_SECRET);
     if (decoded?.guardId) {
-      if (!await guardEnabled(decoded.guardId)) return res.status(403).json({ ok: false, error: 'Guardia desactivado' });
       (req as any).guard = { id: decoded.guardId, name: decoded.name || null };
+      if (!await guardEnabled(decoded.guardId)) return res.status(403).json({ ok: false, error: 'Guardia desactivado' });
       return next();
     }
   } catch (_) {
@@ -242,7 +217,9 @@ async function requireAdminOrGuard(req: Request, res: Response, next: NextFuncti
   try {
     const decoded = await admin.auth().verifyIdToken(token, true);
     const uid = decoded.uid;
-    const snap = await db.ref(`admins/${uid}`).once("value");
+    const mapping = (await db.ref(`portalProfiles/${uid}`).get()).val();
+    if (mapping && (mapping.active === false || mapping.role !== 'admin')) return res.status(403).json({ ok: false, error: 'not admin' });
+    const snap = await db.ref(`admins/${mapping?.id || uid}`).once("value");
     if (!snap.exists()) return res.status(403).json({ ok: false, error: "not admin" });
     const profile = snap.val();
     if (profile.role !== "admin" || profile.active === false) return res.status(403).json({ ok: false, error: "not admin role" });
@@ -560,6 +537,8 @@ async function logAccess(params: {
       validatedById: params.request ? ((params.request as any).portal?.uid || (params.request as any).guard?.id || (params.request as any).admin?.uid || null) : null,
       validatedByRole: params.request ? ((params.request as any).portal?.role || ((params.request as any).guard ? "guard" : (params.request as any).admin ? "admin" : null)) : null,
       validatedByName: params.request ? ((params.request as any).portal?.name || (params.request as any).guard?.name || (params.request as any).admin?.name || null) : null,
+      guardId: (params.request as any)?.guard?.id || null,
+      shiftId: (params.request as any)?.shiftId || null,
       validatorIp: params.request?.ip || null,
       validatorUserAgent: params.request?.headers["user-agent"] || null,
       timestamp: now
@@ -811,16 +790,21 @@ app.post("/validate", async (req, res, next) => {
   if ((req as any).guard) {
     const guardId = (req as any).guard.id;
     const shifts = (await db.ref('guardShifts').get()).val() || {};
-    const onShift = Object.values(shifts).some((value: any) => value?.guardId === guardId && value?.active !== false && !value?.endTimestamp);
+    const onShift = Object.entries(shifts).find(([, value]: [string, any]) => value?.guardId === guardId && value?.active !== false && !value?.endTimestamp);
     if (!onShift) {
       await logAccess({ request: req, authorized: false, reason: 'GUARD_NOT_ON_SHIFT', sessionId });
       return res.status(403).json({ ok: false, error: 'Debes iniciar tu turno antes de validar accesos.', reason: 'GUARD_NOT_ON_SHIFT' });
     }
+    (req as any).shiftId = onShift[0];
   }
 
   if (!rawToken) {
     await logAccess({ request: req, authorized: false, reason: "token required", sessionId });
     return res.status(400).json({ ok: false, error: "token required" });
+  }
+  if (!['entry', 'exit', 'auto'].includes(requestedType) || !sessionId || /[.#$\[\]/]/.test(sessionId)) {
+    await logAccess({ request: req, authorized: false, reason: 'invalid access request' });
+    return res.status(400).json({ ok: false, reason: 'invalid access request' });
   }
 
     let foundKey: string | null = null;
@@ -847,6 +831,10 @@ app.post("/validate", async (req, res, next) => {
       });
       return res.status(400).json({ ok: false, error: dynamicQr.reason, reason: dynamicQr.reason });
     } else {
+      if (process.env.NODE_ENV !== 'test' || process.env.ALLOW_LEGACY_STATIC_QR !== 'true') {
+        await logAccess({ request: req, authorized: false, reason: 'static qr disabled', sessionId });
+        return res.status(400).json({ ok: false, reason: 'static qr disabled', error: 'Utilice un QR dinamico vigente.' });
+      }
       const resolved = await resolveStaticAccessToken(rawToken);
       foundKey = resolved.foundKey;
       tokenData = resolved.tokenData;
@@ -1503,42 +1491,6 @@ app.post('/guard/authorize', requireGuard, async (req, res) => {
   res.status(410).json({ ok: false, error: 'Utilice /validate con un QR vigente.' });
 });
 
-// POST /guard/shift/start  (requireGuard)
-app.post("/guard/shift/start", requireGuard, async (req, res) => {
-  try {
-    const guardId = (req as any).guard.id;
-    const { notes, createdByAdminId, force } = req.body || {};
-
-    // comprobar si ya hay un shift activo para este guard (evitar duplicados)
-    const snap = await db.ref("guardShifts").orderByChild("guardId").equalTo(guardId).once("value");
-    const val = snap.val() || {};
-    const open = Object.keys(val)
-      .map(k => ({ id: k, ...(val[k] || {}) }))
-      .filter(s => !s.endTimestamp && s.active !== false); // mayor tolerancia
-
-    if (open.length && !force) {
-      // devolver el shift activo (evita abrir duplicados)
-      return res.status(400).json({ ok:false, error:"already active", shift: open[0] });
-    }
-
-    const ref = db.ref("guardShifts").push();
-    const shiftId = ref.key!;
-    const now = Date.now();
-    await ref.set({
-      guardId,
-      startTimestamp: now,
-      active: true,
-      createdByAdminId: createdByAdminId || null,
-      notes: notes || null
-    });
-    return res.json({ ok:true, shiftId, startTimestamp: now });
-  } catch (err) {
-    console.error("guard/shift/start error:", err);
-    return res.status(500).json({ ok:false, error:"server error" });
-  }
-});
-
-
 // POST /guard/shift/end  (requireGuard) - mejorado
 app.post("/guard/shift/end", requireGuard, async (req, res) => {
   try {
@@ -1577,214 +1529,6 @@ app.post("/guard/shift/end", requireGuard, async (req, res) => {
     return res.status(500).json({ ok:false, error:"server error" });
   }
 });
-
-// guard/authorize (requireGuard)
-// guard/authorize (requireGuard)  -- REEMPLAZAR EXISTENTE con esta versión
-app.post("/guard/authorize", requireGuard, async (req, res) => {
-  try {
-    const guardId = (req as any).guard.id;
-    const { studentId, token, sessionId = "default", note, shiftId, type = "auto" } = req.body || {};
-    if (!studentId && !token) return res.status(400).json({ ok: false, error: "studentId or token required" });
-
-    const now = Date.now();
-
-    // ------------------------
-    // 1) Verificar que el guardia esté en turno
-    // ------------------------
-    // Si se entrega shiftId, verificar que exista y pertenezca al guard y esté activo.
-    // Si no se entrega, buscar cualquier shift activo del guard.
-    let shiftValid = false;
-    let foundShift: any = null;
-    try {
-      if (shiftId) {
-        const sSnap = await db.ref(`guardShifts/${shiftId}`).once("value");
-        if (sSnap.exists()) {
-          const sVal = sSnap.val();
-          if (String(sVal.guardId) === String(guardId) && !sVal.endTimestamp && sVal.active !== false) {
-            shiftValid = true;
-            foundShift = { id: shiftId, ...sVal };
-          }
-        }
-      } else {
-        const sSnap = await db.ref("guardShifts").orderByChild("guardId").equalTo(guardId).once("value");
-        const val = sSnap.val() || {};
-        const open = Object.keys(val)
-          .map(k => ({ id: k, ...(val[k] || {}) }))
-          .filter((s: any) => !s.endTimestamp && s.active !== false)
-          .sort((a:any,b:any)=> (b.startTimestamp||0) - (a.startTimestamp||0));
-        if (open.length) {
-          shiftValid = true;
-          foundShift = open[0];
-        }
-      }
-    } catch (e) {
-      console.warn("shift check failed:", e);
-      shiftValid = false;
-    }
-
-    if (!shiftValid) {
-      // registrar intento
-      await logAccess({
-        id: studentId || null,
-        token: token || null,
-        authorized: false,
-        reason: "guard not on shift",
-        sessionId
-      });
-      return res.status(403).json({ ok: false, error: "Guardia no está en turno" });
-    }
-
-    // ------------------------
-    // 2) Verificar existencia del usuario (studentId o token)
-    // ------------------------
-    let resolvedStudentId: string | null = null;
-    let studentName: string | null = null;
-
-    // Si llega studentId -> comprobar existencia en /students
-    if (studentId) {
-      const sSnap = await db.ref(`students/${studentId}`).once("value");
-      if (!sSnap.exists()) {
-        await logAccess({
-          id: studentId,
-          token: token || null,
-          authorized: false,
-          reason: "student id not found",
-          sessionId
-        });
-        return res.status(400).json({ error: "Este usuario no existe" });
-      }
-      resolvedStudentId = studentId;
-      studentName = sSnap.val().name || null;
-    }
-
-    // Si llega token (y aún no resolvimos studentId) -> buscar token en accessTokens o tokens
-    if (!resolvedStudentId && token) {
-      let foundKey: string | null = null;
-      let tokenData: any = null;
-
-      const tSnap = await db.ref('accessTokens').orderByChild('token').equalTo(String(token)).once('value');
-      if (tSnap.exists()) {
-        const val = tSnap.val();
-        const keys = Object.keys(val);
-        foundKey = keys[0];
-        tokenData = val[foundKey];
-      } else {
-        const altSnap = await db.ref('tokens').orderByChild('token').equalTo(String(token)).once('value');
-        if (altSnap.exists()) {
-          const v = altSnap.val();
-          const keys2 = Object.keys(v);
-          foundKey = keys2[0];
-          tokenData = v[foundKey];
-        }
-      }
-
-      if (!foundKey) {
-        await logAccess({
-          token,
-          authorized: false,
-          reason: "token not linked to any user",
-          sessionId
-        });
-        return res.status(400).json({ error: "Este usuario no existe" });
-      }
-
-      // mark resolved
-      resolvedStudentId = foundKey;
-      try {
-        const sSnap = await db.ref(`students/${foundKey}`).once("value");
-        if (sSnap.exists()) studentName = sSnap.val().name || null;
-      } catch (e) { /* ignore */ }
-    }
-
-    // --------------
-    // 3) Resolver transición de presencia antes de registrar la autorización.
-    // --------------
-    if (!resolvedStudentId) {
-      return res.status(400).json({ ok: false, error: "No se pudo resolver el usuario" });
-    }
-
-    const transition = await commitAccessTransition(resolvedStudentId, String(type).trim().toLowerCase(), sessionId);
-    if (!transition.ok) {
-      await logAccess({
-        id: resolvedStudentId,
-        name: studentName || undefined,
-        token: token || null,
-        authorized: false,
-        reason: transition.reason,
-        sessionId,
-        validationMode: "manual"
-      });
-      return res.status(409).json({ ok: false, error: transition.reason });
-    }
-
-    // --------------
-    // 4) Guard en turno y usuario existente: persistir evidencia completa.
-    // --------------
-    const authRef = db.ref("guardAuthorizations").push();
-    const authId = authRef.key!;
-    await authRef.set({
-      guardId,
-      shiftId: foundShift ? foundShift.id : (shiftId || null),
-      studentId: resolvedStudentId || null,
-      token: token || null,
-      authorized: true,
-      reason: "manual_override",
-      note: note || null,
-      timestamp: now,
-      sessionId,
-      accessType: transition.accessType,
-      previousInside: transition.previousInside,
-      newInside: transition.newInside,
-      validationMode: "manual"
-    });
-
-    await db.ref(`students/${resolvedStudentId}`).update({
-      lastAccessTimestamp: now,
-      lastAccessType: transition.accessType
-    });
-    await db.ref(`attendance/${sessionId}/${resolvedStudentId}`).push({
-      type: transition.accessType,
-      accessType: transition.accessType,
-      timestamp: now,
-      guardId,
-      authId,
-      shiftId: foundShift ? foundShift.id : (shiftId || null),
-      previousInside: transition.previousInside,
-      newInside: transition.newInside,
-      validationMode: "manual"
-    });
-
-    await db.ref("accessHistory").push({
-      id: resolvedStudentId || null,
-      token: token || null,
-      authorized: true,
-      reason: "manual_override",
-      note: note || null,
-      timestamp: now,
-      guardOverrideId: authId,
-      shiftId: foundShift ? foundShift.id : (shiftId || null),
-      accessType: transition.accessType,
-      previousInside: transition.previousInside,
-      newInside: transition.newInside,
-      validationMode: "manual",
-      qrVersion: null,
-      sessionId
-    });
-
-    return res.json({
-      ok: true,
-      authId,
-      timestamp: now,
-      accessType: transition.accessType,
-      inside: transition.newInside
-    });
-  } catch (err) {
-    console.error("guard/authorize", err);
-    await logAccess({ token: req.body?.token || null, id: req.body?.studentId || null, authorized: false, reason: "server error" });
-    return res.status(500).json({ ok: false, error: "server" });
-  }
-});
-
 
 /* --------------------
    Admin read endpoints for shifts/authorizations/teachers/admins
@@ -2035,48 +1779,6 @@ app.post("/admins",requireFirebaseAdmin, async (req, res) => {
   }
 });
 
-
-// POST /admin/guard/shift/start  (requireAdmin)
-app.post('/admin/guard/shift/start',requireFirebaseAdmin, async (req, res) => {
-  try {
-    const { guardId, notes, force } = req.body || {};
-    if (!guardId) return res.status(400).json({ ok:false, error: 'guardId required' });
-
-    // comprobar si ya hay un shift activo para este guard
-    const snap = await db.ref("guardShifts").orderByChild("guardId").equalTo(guardId).once("value");
-    const val = snap.val() || {};
-    const open = Object.keys(val)
-      .map(k => ({ id: k, ...(val[k] || {}) }))
-      .filter(s => !s.endTimestamp && s.active !== false);
-
-    if (open.length && !force) {
-      return res.status(400).json({ ok:false, error: 'already active', shift: open[0] });
-    }
-
-    const ref = db.ref("guardShifts").push();
-    const shiftId = ref.key!;
-    const now = Date.now();
-    await ref.set({
-      guardId,
-      startTimestamp: now,
-      active: true,
-      createdByAdminId: 'admin-ui',
-      notes: notes || null
-    });
-
-    await logAdminAction(req, {
-      action: "guard_shift.start",
-      entityType: "guardShift",
-      entityId: shiftId,
-      metadata: { guardId }
-    });
-
-    return res.json({ ok:true, shiftId, startTimestamp: now });
-  } catch (err) {
-    console.error('/admin/guard/shift/start error:', err);
-    return res.status(500).json({ ok:false, error: 'server error' });
-  }
-});
 
 app.post('/admin/guard/shift/end',requireFirebaseAdmin, async (req, res) => {
   try {
