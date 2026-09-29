@@ -22,7 +22,8 @@ function runScript(script, args) {
         ...process.env,
         FIREBASE_DATABASE_EMULATOR_HOST: emulatorHost,
         FIREBASE_DATABASE_URL: databaseUrl,
-        GCLOUD_PROJECT: projectId
+        GCLOUD_PROJECT: projectId,
+        BACKUP_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
       },
       stdio: ["ignore", "pipe", "pipe"]
     });
@@ -80,13 +81,44 @@ test("genera respaldo con secretos redactados", async () => {
   assert.equal(restorePreview.collections.accessHistory, 2);
 });
 
+test("restaura datos y perfiles, excluyendo sesiones y secretos regenerables", async () => {
+  const db = getDatabase(seedApp);
+  await db.ref("admins/admin-1").set({ name: "Admin", role: "admin" });
+  await db.ref("portalProfiles/user-1").set({ id: "student-1", role: "member", active: true });
+  const file = path.join(outputDir, "complete-restore.json");
+  await runScript("backup-rtdb.mjs", [`--output=${outputDir}`, "--file=complete-restore.json"]);
+  await db.ref().set({ marker: "cleared" });
+  const applied = await runScript("restore-rtdb.mjs", [`--file=${file}`, "--apply=true"]);
+  assert.equal(applied.mode, "apply");
+  assert.equal((await db.ref("admins/admin-1/role").once("value")).val(), "admin");
+  assert.equal((await db.ref("portalProfiles/user-1/role").once("value")).val(), "member");
+  assert.equal((await db.ref("portalSessions").once("value")).exists(), false);
+  assert.equal((await db.ref("dynamicQrNonces").once("value")).exists(), false);
+});
+
+test("genera respaldo cifrado y permite previsualizar su restauracion", async () => {
+  const encryptedDir = path.join(outputDir, "encrypted");
+  const key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  const result = await runScript("backup-rtdb.mjs", [`--output=${encryptedDir}`, "--file=encrypted.json", "--encrypt=true"]);
+  assert.equal(result.encrypted, true);
+  const envelope = JSON.parse(await fs.readFile(path.join(encryptedDir, "encrypted.json"), "utf8"));
+  assert.equal(envelope.encrypted, true);
+  assert.equal(envelope.collections, undefined);
+  const restorePreview = await runScript("restore-rtdb.mjs", [`--file=${path.join(encryptedDir, "encrypted.json")}`]);
+  assert.equal(restorePreview.mode, "preview");
+});
+
 test("retención opera en preview y luego aplica el borrado", async () => {
+  const db = getDatabase(seedApp);
+  const oldTimestamp = Date.now() - 120 * 24 * 60 * 60 * 1000;
+  await db.ref("accessHistory/old").set({ timestamp: oldTimestamp, token: "sensitive-token" });
+  await db.ref("dynamicQrNonces/expired").set({ expiresAt: Date.now() - 1000, usedAt: oldTimestamp });
+  await db.ref("dynamicQrNonces/active").set({ expiresAt: Date.now() + 60000, usedAt: Date.now() });
   const preview = await runScript("retention-rtdb.mjs", ["--retention-days=90"]);
   assert.equal(preview.mode, "preview");
   assert.equal(preview.affected.dynamicQrNonces, 1);
   assert.equal(preview.affected.accessHistory, 1);
 
-  const db = getDatabase(seedApp);
   assert.ok((await db.ref("accessHistory/old").once("value")).exists());
 
   const applied = await runScript("retention-rtdb.mjs", ["--retention-days=90", "--apply=true"]);

@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   backup:
@@ -15,9 +16,12 @@ jobs:
       NODE_ENV: staging
       FIREBASE_DATABASE_URL: ${{ secrets.STAGING_FIREBASE_DATABASE_URL }}
       FIREBASE_SERVICE_ACCOUNT: ${{ secrets.STAGING_FIREBASE_SERVICE_ACCOUNT }}
+      GCLOUD_PROJECT: ${{ secrets.STAGING_FIREBASE_PROJECT_ID }}
+      BACKUP_ENCRYPTION_KEY: ${{ secrets.STAGING_BACKUP_ENCRYPTION_KEY }}
+      BACKUP_ENCRYPT: true
       JWT_SECRET: ci-placeholder-not-used
       QR_SECRET: ci-placeholder-not-used
-      ALLOWED_ORIGINS: https://staging.example.inacap.cl
+      ALLOWED_ORIGINS: https://staging.control-seguridad.example
       BACKUP_OUTPUT_DIR: ./backups
     steps:
       - name: Checkout
@@ -30,15 +34,26 @@ jobs:
           cache-dependency-path: backend/package-lock.json
       - name: Install dependencies
         run: npm ci --prefix backend
-      - name: Run redacted backup
+      - name: Run encrypted redacted backup
         working-directory: backend
-        run: node scripts/backup-rtdb.mjs --output=./backups --file="rtdb-${GITHUB_RUN_ID}.json"
-      - name: Preview retention
+        run: node scripts/backup-rtdb.mjs --encrypt=true --output=./backups --file="rtdb-${GITHUB_RUN_ID}.json"
+      - name: Apply retention
         working-directory: backend
-        run: node scripts/retention-rtdb.mjs --retention-days=90 > ./backups/retention-preview-${GITHUB_RUN_ID}.json
+        run: node scripts/retention-rtdb.mjs --retention-days=90 --apply=true > ./backups/retention-${GITHUB_RUN_ID}.json
       - name: Upload backup artifact
         uses: actions/upload-artifact@v4
         with:
           name: staging-rtdb-backup-${{ github.run_id }}
           path: backend/backups
           retention-days: 30
+      - name: Alert failed backup
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Backup staging fallido: ${context.run_id}`,
+              body: `El scheduler de respaldo staging fallo. Revisar la ejecucion ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.run_id}.`
+            });

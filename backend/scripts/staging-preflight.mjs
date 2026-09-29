@@ -9,6 +9,7 @@ if (process.env.NODE_ENV !== "staging") errors.push("NODE_ENV debe ser staging."
 for (const name of ["FIREBASE_DATABASE_URL", "JWT_SECRET", "QR_SECRET", "ALLOWED_ORIGINS"]) {
   if (!process.env[name]) errors.push(`${name} no está configurado.`);
 }
+if (process.env.NODE_ENV === "staging" && !process.env.BACKUP_ENCRYPTION_KEY) errors.push("BACKUP_ENCRYPTION_KEY no esta configurada.");
 if (process.env.QR_SECRET && process.env.JWT_SECRET === process.env.QR_SECRET) {
   errors.push("QR_SECRET debe ser independiente de JWT_SECRET.");
 }

@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { deleteApp } from "firebase-admin/app";
 import { createDatabaseClient } from "./firebase-runtime.mjs";
+import { decryptBackup } from "./backup-crypto.mjs";
 
 const args = new Map();
 for (let index = 2; index < process.argv.length; index += 1) {
@@ -16,7 +17,7 @@ if (!file) {
   process.exit(2);
 }
 
-const backup = JSON.parse(await fs.readFile(path.resolve(file), "utf8"));
+const backup = decryptBackup(JSON.parse(await fs.readFile(path.resolve(file), "utf8")));
 const collections = backup.collections || {};
 const summary = Object.fromEntries(Object.entries(collections).map(([name, value]) => [
   name,
@@ -31,6 +32,7 @@ if (!applyChanges) {
 const { app, db } = createDatabaseClient("restore");
 try {
   for (const [collection, value] of Object.entries(collections)) {
+    if (["portalSessions", "dynamicQrNonces"].includes(collection)) continue;
     await db.ref(collection).set(value);
   }
   console.log(JSON.stringify({ ok: true, mode: "apply", source: path.resolve(file), redacted: backup.redacted === true, collections: summary }, null, 2));

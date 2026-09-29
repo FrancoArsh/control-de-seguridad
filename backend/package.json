@@ -15,13 +15,14 @@
     "emulator:ops": "firebase emulators:exec --only database --project control-de-seguridad-test \"node --test test/operations.test.mjs\"",
     "emulator:recovery": "firebase emulators:exec --only database --project control-de-seguridad-test \"node --test test/recovery.test.mjs\"",
     "load:test": "node scripts/load-test.mjs",
-    "backup:staging": "node scripts/backup-rtdb.mjs",
+    "backup:staging": "node scripts/backup-rtdb.mjs --encrypt=true",
     "retention:preview": "node scripts/retention-rtdb.mjs",
     "retention:apply": "node scripts/retention-rtdb.mjs --apply=true",
     "restore:preview": "node scripts/restore-rtdb.mjs",
     "restore:apply": "node scripts/restore-rtdb.mjs --apply=true",
     "staging:preflight": "node scripts/staging-preflight.mjs",
-    "credentials:recovery": "node scripts/credential-recovery.mjs"
+    "credentials:recovery": "node scripts/credential-recovery.mjs",
+    "personal-data:preview": "node scripts/delete-personal-data.mjs"
   },
   "dependencies": {
     "@types/pdfkit": "^0.13.9",
