@@ -3,7 +3,9 @@ import admin from 'firebase-admin';
 import crypto from 'crypto';
 import axios from 'axios';
 import PDFDocument from 'pdfkit';
-import { startShift } from './shifts';
+import { startShift, endShift } from './shifts';
+import { readGuardReport } from './guard-report';
+import { HistoryInputError, readHistoryPage } from './history';
 
 type Profile = { uid: string; id: string; role: 'admin' | 'guard' | 'member'; name: string };
 const cookieName = 'control_session';
@@ -193,7 +195,7 @@ export function installPortal(app: Router, db: admin.database.Database, qr: (id:
     if ((req as any).portal?.role !== 'admin') return res.status(403).json({ ok: false, error: 'Solo administradores pueden consultar guardias.' });
     try {
       const [guardsSnap, shiftsSnap] = await Promise.all([db.ref('guards').get(), db.ref('guardShifts').get()]);
-      const shifts = Object.values(shiftsSnap.val() || {}) as any[];
+      const shifts = Object.entries(shiftsSnap.val() || {}).map(([id, value]: [string, any]) => ({ ...value, id }));
       const data = await Promise.all(Object.entries(guardsSnap.val() || {}).map(async ([id, value]: [string, any]) => {
         const uid = value?.authUid || null;
         let email = value?.email || null;
@@ -209,25 +211,11 @@ export function installPortal(app: Router, db: admin.database.Database, qr: (id:
   router.get('/guard-report', async (req, res) => {
     if ((req as any).portal?.role !== 'admin') return res.status(403).json({ ok: false, error: 'Solo administradores pueden consultar el historial de guardias.' });
     try {
-      const [guardsSnap, shiftsSnap, historySnap] = await Promise.all([db.ref('guards').get(), db.ref('guardShifts').get(), db.ref('accessHistory').get()]);
-      const historyRows = Object.values(historySnap.val() || {}) as any[];
-      const shifts = Object.entries(shiftsSnap.val() || {}).map(([id, value]: [string, any]) => ({ id, ...(value || {}) }));
-      const data = Object.entries(guardsSnap.val() || {}).flatMap(([id, value]: [string, any]) => {
-        const guard = value || {};
-        const guardShifts = shifts.filter(shift => shift.guardId === id).sort((a, b) => Number(b.startTimestamp || 0) - Number(a.startTimestamp || 0));
-        const sourceRows = historyRows.filter(row => row.validatedById === guard.authUid || row.guardId === id);
-        const rows = guardShifts.length ? guardShifts : [{ id: null, startTimestamp: null, endTimestamp: null, active: false }];
-        return rows.map(shift => {
-          const start = Number(shift.startTimestamp || 0);
-          const end = Number(shift.endTimestamp || Date.now());
-          const accessRows = sourceRows.filter(row => Number(row.timestamp || 0) >= start && (!start || Number(row.timestamp || 0) <= end));
-          const approvedAccesses = accessRows.filter(row => row.authorized === true).length;
-          const rejectedAccesses = accessRows.filter(row => row.authorized === false).length;
-          return { id, name: guard.name || id, email: guard.email || null, active: guard.active !== false, shiftId: shift.id, startTimestamp: shift.startTimestamp || null, endTimestamp: shift.endTimestamp || null, shiftActive: shift.active !== false && !shift.endTimestamp, approvedAccesses, rejectedAccesses, totalAccesses: approvedAccesses + rejectedAccesses };
-        });
-      });
-      return res.json({ ok: true, generatedAt: Date.now(), data });
-    } catch { return res.status(503).json({ ok: false, error: 'No se pudo cargar el historial de guardias.' }); }
+      return res.json({ ok: true, ...await readGuardReport(db, req.query) });
+    } catch (error) {
+      if (error instanceof HistoryInputError) return res.status(400).json({ ok: false, error: error.message });
+      return res.status(503).json({ ok: false, error: 'No se pudo cargar el historial de guardias.' });
+    }
   });
 
   router.post('/users', async (req, res) => {
@@ -294,9 +282,14 @@ export function installPortal(app: Router, db: admin.database.Database, qr: (id:
       if (!mapping?.id || !['admin', 'guard', 'member'].includes(mapping.role)) return res.status(409).json({ ok: false, error: 'Perfil no vinculado.' });
       const authUser = await admin.auth().updateUser(uid, { disabled: !active });
       if (mapping) {
-        await db.ref(`portalProfiles/${uid}`).set({ id: mapping.id, role: mapping.role, active });
         const collection = mapping.role === 'admin' ? 'admins' : mapping.role === 'guard' ? 'guards' : 'students';
-        await db.ref(`${collection}/${mapping.id}`).update({ active });
+        const updates: Record<string, any> = {
+          [`portalProfiles/${uid}`]: { id: mapping.id, role: mapping.role, active },
+          [`${collection}/${mapping.id}/active`]: active
+        };
+        // Revocation participates in the same per-person transaction as QR use.
+        if (mapping.role === 'member') updates[`accessState/${mapping.id}/accessDisabled`] = !active;
+        await db.ref().update(updates);
       }
       await db.ref('adminAuditLog').push({ actorId: (req as any).portal.uid, action: active ? 'portal.user.activate' : 'portal.user.deactivate', entityType: 'user', entityId: uid, timestamp: Date.now(), ip: req.ip || null });
       return res.json({ ok: true, uid: authUser.uid, active });
@@ -306,41 +299,21 @@ export function installPortal(app: Router, db: admin.database.Database, qr: (id:
     }
   });
 
-  async function history(user: Profile) {
-    const ref = db.ref('accessHistory');
-    // La base remota puede no tener aun los indices versionados localmente.
-    // Leemos el conjunto protegido por backend y aplicamos filtro/orden aqui.
-    const snapshot = await ref.get();
-    const [students, guards, admins] = await Promise.all([db.ref('students').get(), db.ref('guards').get(), db.ref('admins').get()]);
-    const people: Record<string, any> = { ...(students.val() || {}), ...(guards.val() || {}), ...(admins.val() || {}) };
-    const rows = Object.entries(snapshot.val() || {}).filter(([, row]: [string, any]) => {
-      if (user.role === 'member') return String(row.studentUid || row.id || '') === user.id;
-      if (user.role === 'guard') return row.validatedById === user.uid || row.guardId === user.id;
-      return true;
-    });
-    return rows.map(([key, row]: [string, any]) => {
-      const person = people[row.studentUid || row.id] || {};
-      return {
-        key, id: String(row.studentUid || row.id || ''), name: String(row.name || row.studentName || person.name || row.studentUid || row.id || 'Sin identificar'),
-        timestamp: Number(row.timestamp || 0), accessType: row.accessType || null,
-        authorized: row.authorized === true, reason: String(row.reason || (row.authorized === true ? 'ok' : 'Sin motivo registrado')),
-        sede: String(row.sede || row.campus || person.sede || person.campus || 'Sin sede'), tipoUsuario: String(row.tipoUsuario || row.role || person.tipoUsuario || person.role || 'Sin tipo'),
-        validatedBy: String(row.validatedByName || row.validatedById || 'Sin registrar'), validatedByRole: String(row.validatedByRole || '')
-      };
-    }).sort((a, b) => b.timestamp - a.timestamp).slice(0, 500);
-  }
   router.get('/history', async (req, res) => {
-    try { res.json({ ok: true, data: await history((req as any).portal) }); }
-    catch (error) { console.error('portal history error:', error); res.status(503).json({ ok: false, error: 'No se pudo cargar el historial.' }); }
+    try { res.json({ ok: true, ...await readHistoryPage(db, (req as any).portal, req.query) }); }
+    catch (error) {
+      if (error instanceof HistoryInputError) return res.status(400).json({ ok: false, error: error.message });
+      console.error('portal history error:', error); res.status(503).json({ ok: false, error: 'No se pudo cargar el historial.' });
+    }
   });
   router.get('/history.pdf', async (req, res) => {
     try {
-      const rows = await history((req as any).portal);
+      const { data: rows } = await readHistoryPage(db, (req as any).portal, req.query);
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', 'attachment; filename="historial-accesos.pdf"');
       const document = new PDFDocument({ size: 'A4', margin: 36 });
       document.pipe(res);
-      document.fontSize(16).text('Historial de control de accesos');
+      document.fontSize(16).text('Historial de control de accesos - pagina consultada');
       document.fontSize(9).text(`Generado: ${new Date().toLocaleString('es-CL')} | Registros: ${rows.length}`);
       document.moveDown();
       rows.forEach((row, index) => {
@@ -348,7 +321,10 @@ export function installPortal(app: Router, db: admin.database.Database, qr: (id:
         document.fontSize(8).text(`${index + 1}. ${new Date(row.timestamp).toLocaleString('es-CL')} | ${row.name} (${row.id}) | ${row.accessType || '-'} | ${row.authorized ? 'AUTORIZADO' : 'RECHAZADO'} | ${row.reason} | Valido: ${row.validatedBy}`);
       });
       document.end();
-    } catch (error) { console.error('portal history PDF error:', error); res.status(503).json({ ok: false, error: 'No se pudo exportar el historial.' }); }
+    } catch (error) {
+      if (error instanceof HistoryInputError) return res.status(400).json({ ok: false, error: error.message });
+      console.error('portal history PDF error:', error); res.status(503).json({ ok: false, error: 'No se pudo exportar el historial.' });
+    }
   });
   router.get('/summary', async (req, res) => {
     try {
@@ -393,9 +369,9 @@ export function installPortal(app: Router, db: admin.database.Database, qr: (id:
         .filter(value => value.guardId === user.id && value.active !== false && !value.endTimestamp)
         .sort((a, b) => Number(b.startTimestamp || 0) - Number(a.startTimestamp || 0))[0];
       if (!active) return res.status(404).json({ ok: false, error: 'No tienes un turno activo.' });
-      const endTimestamp = Date.now();
-      await db.ref(`guardShifts/${active.id}`).update({ endTimestamp, active: false, endedBy: user.uid, notes: String(req.body?.notes || active.notes || '').slice(0, 500) || null });
-      res.json({ ok: true, active: false, shift: { ...active, endTimestamp, active: false } });
+      const shift = await endShift(db, user.id, active.id, user.uid, req.body?.notes === undefined ? undefined : String(req.body.notes));
+      if (!shift) return res.status(409).json({ ok: false, error: 'El turno ya fue cerrado o modificado. Actualiza su estado.' });
+      res.json({ ok: true, active: false, shift });
     } catch { res.status(503).json({ ok: false, error: 'No se pudo finalizar el turno.' }); }
   });
   router.get('/qr', async (req, res) => {

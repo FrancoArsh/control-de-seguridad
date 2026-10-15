@@ -12,7 +12,8 @@ import jwt, { SignOptions, Secret } from "jsonwebtoken";
 import bcrypt from "bcrypt";
 import { installPortal } from './portal';
 import { validateStaging } from './environment';
-import { startShift } from './shifts';
+import { startShift, endShift } from './shifts';
+import { commitDynamicAccess, AccessPublicationPending, recoverPendingAccess } from './access-transaction';
 
 dotenv.config({ path: process.env.ENV_FILE || ".env" });
 
@@ -24,17 +25,6 @@ const serviceAccountEnv = process.env.FIREBASE_SERVICE_ACCOUNT || process.env.SE
 /* --------------------
    Verificaciones de env / secret
    -------------------- */
-function ensureAdminSecretConfigured() {
-  if (!process.env.ADMIN_SECRET) {
-    console.error(
-      "\n[ERROR] ADMIN_SECRET no está configurado en las variables de entorno.\n" +
-      "Crea backend/.env con ADMIN_SECRET=tu_valor_secreto y reinicia el servidor.\n" +
-      "Ejemplo: ADMIN_SECRET=usa_un_valor_largo_aleatorio\n"
-    );
-    process.exit(1);
-  }
-}
-
 function ensureEnv() {
   if (!process.env.ADMIN_SECRET) {
     console.error("ADMIN_SECRET no configurado. Agrega en backend/.env");
@@ -51,7 +41,6 @@ function ensureEnv() {
 }
 
 // Ejecutar comprobaciones iniciales
-ensureAdminSecretConfigured();
 ensureEnv();
 
 const ADMIN_SECRET = process.env.ADMIN_SECRET!;
@@ -370,24 +359,10 @@ function verifyDynamicQrToken(token: string): { ok: true; payload: DynamicQrPayl
   }
 }
 
-async function markDynamicQrNonceUsed(payload: DynamicQrPayload) {
-  const nonceRef = db.ref(`dynamicQrNonces/${payload.nonce}`);
-  const result = await nonceRef.transaction((current) => {
-    if (current) return;
-    return {
-      userId: payload.sub,
-      issuedAt: payload.iat,
-      expiresAt: payload.exp,
-      usedAt: Date.now()
-    };
-  });
-  return result.committed === true;
-}
-
 async function cleanupExpiredQrNonces() {
   try {
     const now = Date.now();
-    const snap = await db.ref("dynamicQrNonces").once("value");
+    const snap = await db.ref("dynamicQrNonces").orderByChild('expiresAt').endAt(now).limitToFirst(500).once("value");
     const expired = Object.fromEntries(Object.entries(snap.val() || {}).filter(([, value]: [string, any]) => Number(value?.expiresAt || 0) <= now).slice(0, 500));
     const updates: Record<string, null> = {};
     for (const nonce of Object.keys(expired)) {
@@ -411,6 +386,17 @@ const qrNonceCleanupTimer = setInterval(() => {
 }, QR_NONCE_CLEANUP_INTERVAL_MS);
 qrNonceCleanupTimer.unref?.();
 void cleanupExpiredQrNonces();
+let recoveringAccess = false;
+const recoverAccess = async () => {
+  if (recoveringAccess) return;
+  recoveringAccess = true;
+  try { await recoverPendingAccess(db); }
+  catch (error) { console.error('Pending access recovery failed:', error); }
+  finally { recoveringAccess = false; }
+};
+const accessRecoveryTimer = setInterval(() => { void recoverAccess(); }, 30000);
+accessRecoveryTimer.unref?.();
+void recoverAccess();
 
 async function resolveStaticAccessToken(token: string) {
   let tokenNodeSnap = await db.ref('accessTokens').orderByChild('token').equalTo(token).once('value');
@@ -642,7 +628,11 @@ installPortal(app, db, async id => {
   const checked = verifyDynamicQrToken(token);
   if (!checked.ok) return { renew: true };
   if (checked.payload.sub !== id) throw new Error('QR owner mismatch');
-  const used = (await db.ref(`dynamicQrNonces/${checked.payload.nonce}`).get()).exists();
+  const [local, legacy] = await Promise.all([
+    db.ref(`accessState/${id}/_usedQrNonces/${checked.payload.nonce}`).get(),
+    db.ref(`dynamicQrNonces/${checked.payload.nonce}`).get()
+  ]);
+  const used = local.exists() || legacy.exists();
   return { renew: used };
 });
 
@@ -860,14 +850,30 @@ app.post("/validate", async (req, res, next) => {
     const studentSede = studentVal.sede || studentVal.campus || null;
     const studentTipo = studentVal.tipoUsuario || studentVal.role || null;
 
-    // El nonce se consume antes del cooldown para que un QR ya utilizado
-    // quede inhabilitado de inmediato y no pueda reutilizarse después.
+    // Successful dynamic access commits its nonce, presence and evidence together.
     if (dynamicPayload) {
-      const nonceAccepted = await markDynamicQrNonceUsed(dynamicPayload);
-      if (!nonceAccepted) {
-        await logAccess({ id: foundKey, studentUid: foundKey, name: studentName, token: rawToken, authorized: false, reason: "qr already used", sessionId, validationMode, qrVersion, request: req, sede: studentSede, tipoUsuario: studentTipo });
-        return res.status(409).json({ ok: false, error: "qr already used", reason: "qr already used" });
+      const actor = (req as any).portal || (req as any).guard || (req as any).admin;
+      const result = await commitDynamicAccess(db, {
+        userId: foundKey, type: requestedType as 'entry' | 'exit' | 'auto', sessionId,
+        eventId: db.ref('accessHistory').push().key!, cooldownMs: ACCESS_COOLDOWN_MS,
+        nonce: dynamicPayload.nonce, issuedAt: dynamicPayload.iat, expiresAt: dynamicPayload.exp,
+        audit: {
+          tokenFingerprint: crypto.createHash('sha256').update(rawToken).digest('hex'),
+          validatedById: actor?.uid || actor?.id || null, validatedByName: actor?.name || null,
+          validatedByRole: (req as any).portal?.role || ((req as any).guard ? 'guard' : 'admin'),
+          guardId: (req as any).guard?.id || null, shiftId: (req as any).shiftId || null,
+          validatorIp: req.ip || null, validatorUserAgent: req.headers['user-agent'] || null
+        }
+      });
+      if (!result.ok) {
+        await logAccess({ id: foundKey, name: studentName, token: rawToken, authorized: false, reason: result.reason,
+          sessionId, validationMode, qrVersion, request: req, sede: studentSede, tipoUsuario: studentTipo });
+        const status = ['cooldown active', 'user disabled', 'guard disabled', 'GUARD_NOT_ON_SHIFT'].includes(result.reason) ? 403 : result.reason === 'qr expired' ? 400 : 409;
+        return res.status(status).json({ ok: false, error: result.reason, reason: result.reason === 'cooldown active' ? 'COOLDOWN_ACTIVE' : result.reason });
       }
+      return res.json({ ok: true, studentUid: foundKey, name: result.name, accessType: result.accessType,
+        inside: result.newInside, validationMode, qrVersion,
+        message: result.accessType === 'entry' ? 'Entrada registrada' : 'Salida registrada' });
     }
 
     const lastAccessTimestamp = Number(studentVal.lastAccessTimestamp || 0);
@@ -972,6 +978,11 @@ app.post("/validate", async (req, res, next) => {
     });
 
   } catch (err) {
+    if (err instanceof AccessPublicationPending) {
+      console.error('Access audit publication pending:', err.eventId);
+      return res.status(503).json({ ok: false, reason: 'ACCESS_PUBLICATION_PENDING', eventId: err.eventId,
+        error: 'Movimiento registrado, auditoria pendiente de recuperacion. Consulte el estado antes de repetir.' });
+    }
     console.error("validate error:", err);
     await logAccess({ request: req, authorized: false, reason: "server error", sessionId });
     return res.status(500).json({ ok: false, error: "server error" });
@@ -1497,6 +1508,10 @@ app.post("/guard/shift/end", requireGuard, async (req, res) => {
     const guardId = (req as any).guard.id;
     const { shiftId, notes } = req.body || {};
 
+    if (shiftId !== undefined && (typeof shiftId !== 'string' || !shiftId || /[.#$\[\]/\u0000-\u001f\u007f]/.test(shiftId))) {
+      return res.status(400).json({ ok: false, error: 'invalid shift identifier' });
+    }
+
     if (shiftId) {
       const sSnap = await db.ref(`guardShifts/${shiftId}`).once("value");
       if (!sSnap.exists()) return res.status(404).json({ ok:false, error:"shift not found" });
@@ -1504,9 +1519,9 @@ app.post("/guard/shift/end", requireGuard, async (req, res) => {
       if (String(shift.guardId) !== String(guardId)) return res.status(403).json({ ok:false, error:"not owner of shift" });
       if (shift.endTimestamp) return res.status(400).json({ ok:false, error:"shift already ended" });
 
-      const endTs = Date.now();
-      await db.ref(`guardShifts/${shiftId}`).update({ endTimestamp: endTs, active: false, notes: notes || shift.notes || null });
-      return res.json({ ok:true, shiftId, endTimestamp: endTs });
+      const closed = await endShift(db, guardId, shiftId, (req as any).portal?.uid || guardId, notes === undefined ? undefined : String(notes));
+      if (!closed) return res.status(409).json({ ok: false, error: 'shift already ended or changed' });
+      return res.json({ ok:true, shiftId, endTimestamp: closed.endTimestamp });
     }
 
     // buscar shift activo más reciente para este guard
@@ -1520,10 +1535,9 @@ app.post("/guard/shift/end", requireGuard, async (req, res) => {
     if (!openShifts.length) return res.status(404).json({ ok:false, error:"no active shift found for guard" });
 
     const target = openShifts[0];
-    const endTs = Date.now();
-    await db.ref(`guardShifts/${target.id}`).update({ endTimestamp: endTs, active: false, notes: notes || target.notes || null });
-
-    return res.json({ ok:true, shiftId: target.id, endTimestamp: endTs, message:"closed latest active shift" });
+    const closed = await endShift(db, guardId, target.id, (req as any).portal?.uid || guardId, notes === undefined ? undefined : String(notes));
+    if (!closed) return res.status(409).json({ ok: false, error: 'shift already ended or changed' });
+    return res.json({ ok:true, shiftId: target.id, endTimestamp: closed.endTimestamp, message:"closed latest active shift" });
   } catch (err) {
     console.error("guard/shift/end (improved) error:", err);
     return res.status(500).json({ ok:false, error:"server error" });
@@ -1789,8 +1803,9 @@ app.post('/admin/guard/shift/end',requireFirebaseAdmin, async (req, res) => {
       if (!sSnap.exists()) return res.status(404).json({ ok:false, error: 'shift not found' });
       const shift = sSnap.val();
       if (shift.endTimestamp) return res.status(400).json({ ok:false, error: 'shift already ended' });
-      const endTs = Date.now();
-      await db.ref(`guardShifts/${shiftId}`).update({ endTimestamp: endTs, active: false, notes: notes || shift.notes || null });
+      const closed = await endShift(db, shift.guardId, shiftId, (req as any).portal?.uid || (req as any).admin.uid, notes === undefined ? undefined : String(notes));
+      if (!closed) return res.status(409).json({ ok: false, error: 'shift already ended' });
+      const endTs = closed.endTimestamp;
       await logAdminAction(req, {
         action: "guard_shift.end",
         entityType: "guardShift",
@@ -1812,8 +1827,9 @@ app.post('/admin/guard/shift/end',requireFirebaseAdmin, async (req, res) => {
     if (!openShifts.length) return res.status(404).json({ ok:false, error: 'no active shift found for guard' });
 
     const target = openShifts[0];
-    const endTs = Date.now();
-    await db.ref(`guardShifts/${target.id}`).update({ endTimestamp: endTs, active: false, notes: notes || target.notes || null });
+    const closed = await endShift(db, guardId, target.id, (req as any).portal?.uid || (req as any).admin.uid, notes === undefined ? undefined : String(notes));
+    if (!closed) return res.status(409).json({ ok: false, error: 'shift already ended' });
+    const endTs = closed.endTimestamp;
 
     await logAdminAction(req, {
       action: "guard_shift.end",

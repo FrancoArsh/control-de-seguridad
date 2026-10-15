@@ -14,3 +14,10 @@ backend/backups/
 backend/.tmp/
 backend/recovery/
 .docx_work/
+# Local credential exports must never be published.
+backend/guards-created.csv
+backend/output/
+backend/QRS/
+firebase-debug.log
+database-debug.log
+ui-debug.log

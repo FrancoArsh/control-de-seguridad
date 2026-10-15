@@ -5,6 +5,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import bcrypt from "bcrypt";
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
 import { initializeApp, deleteApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { getDatabase } from "firebase-admin/database";
@@ -51,10 +52,19 @@ async function portalRequest(pathname, options = {}) {
 }
 
 before(async () => {
+  assert.match(projectId, /^demo-/, 'Integration tests require a demo project, never a live project');
+  assert.match(emulatorHost, /^(127\.0\.0\.1|localhost):\d+$/);
   if (!process.env.FIREBASE_DATABASE_EMULATOR_HOST) {
     process.env.FIREBASE_DATABASE_EMULATOR_HOST = emulatorHost;
   }
   process.env.FIREBASE_AUTH_EMULATOR_HOST = process.env.FIREBASE_AUTH_EMULATOR_HOST || "127.0.0.1:9099";
+  assert.match(process.env.FIREBASE_AUTH_EMULATOR_HOST, /^(127\.0\.0\.1|localhost):\d+$/);
+
+  const rules = await fetch(`http://${emulatorHost}/.settings/rules.json?ns=${projectId}`, {
+    method: 'PUT', headers: { Authorization: 'Bearer owner', 'Content-Type': 'application/json' },
+    body: await fs.readFile(path.join(root, 'database.rules.json'), 'utf8')
+  });
+  assert.equal(rules.status, 200);
 
   seedApp = initializeApp({ projectId, databaseURL: databaseUrl }, "integration-seed");
   const seedDb = getDatabase(seedApp);
@@ -84,6 +94,9 @@ before(async () => {
     cwd: root,
     env: {
       ...process.env,
+      ENV_FILE: path.join(root, 'test', 'nonexistent-test.env'),
+      FIREBASE_SERVICE_ACCOUNT: '', SERVICE_ACCOUNT_JSON: '', SERVICE_ACCOUNT_JSON_BASE64: '',
+      APP_ENV: 'test',
       NODE_ENV: "test",
       ALLOW_LEGACY_STATIC_QR: 'true',
       PORT: String(port),
@@ -130,7 +143,7 @@ test('QR dinamico: concurrencia, replay, salida y auditoria', async () => {
   const qr = signedQr('dynamic-person');
   const results = await Promise.all(Array.from({ length: 6 }, () => validate(headers, qr)));
   assert.equal(results.filter(r => r.body.ok === true).length, 1);
-  assert.equal(results.filter(r => r.body.reason === 'qr already used').length, 5);
+  assert.equal(results.filter(r => r.body.reason === 'qr already used').length, 5, JSON.stringify(results.map(r => r.body)));
   assert.equal((await db.ref('accessState/dynamic-person').get()).val().inside, true);
   const replay = await validate(headers, qr);
   assert.equal(replay.response.status, 409);
@@ -313,6 +326,24 @@ test("autentica el portal y aplica la sesion y el rol de administrador", async (
   });
   assert.equal(disabled.response.status, 200);
   assert.equal(disabled.body.active, false);
+
+  const db = getDatabase(seedApp);
+  const stateRef = db.ref(`accessState/${created.body.user.id}/accessDisabled`);
+  assert.equal((await stateRef.get()).val(), true);
+  const enabled = await portalRequest(`/portal/users/${created.body.user.uid}`, {
+    method: 'PATCH', body: JSON.stringify({ active: true })
+  });
+  assert.equal(enabled.response.status, 200);
+  assert.equal((await stateRef.get()).val(), false);
+  await db.ref('guardShifts/admin-race').set({ guardId: 'guard-001', active: true, startTimestamp: Date.now() });
+  const closures = await Promise.all(Array.from({ length: 6 }, (_, i) => portalRequest('/admin/guard/shift/end', {
+    method: 'POST', body: JSON.stringify({ shiftId: 'admin-race', notes: `winner-${i}` })
+  })));
+  assert.equal(closures.filter(r => r.response.status === 200).length, 1);
+  const closedShift = (await db.ref('guardShifts/admin-race').get()).val();
+  assert.equal(closedShift.endedBy, login.body.user.uid);
+  const winner = closures.findIndex(r => r.response.status === 200);
+  assert.equal(closedShift.notes, `winner-${winner}`);
 
   const logout = await portalRequest("/portal/logout", { method: "POST", body: "{}" });
   assert.equal(logout.response.status, 200);

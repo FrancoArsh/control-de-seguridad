@@ -5,6 +5,9 @@
     "accessHistory": {
       ".indexOn": ["timestamp", "studentUid", "guardId", "shiftId"]
     },
+    "accessState": {
+      ".indexOn": ["_pendingAccess/status"]
+    },
     "adminAuditLog": {
       ".indexOn": ["timestamp", "actorId"]
     },
