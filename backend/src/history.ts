@@ -48,6 +48,20 @@ export async function readHistoryPage(db: Database, user: Viewer, query: Record<
     const available = batch.filter(item => item.key !== cursor?.key);
     const entries = available.slice(0, 100);
     if (!entries.length) { exhausted = true; break; }
+    // Legacy events lack profile fields. Resolve distinct people in small parallel
+    // batches instead of serializing hundreds of network round trips per page.
+    const missing = [...new Set(entries.filter(({ row }) => row && typeof row === 'object')
+      .filter(({ row }) => user.role === 'admin' || (user.role === 'member'
+        ? String(row.studentUid || row.id || '') === user.id : row.validatedById === user.uid || row.guardId === user.id))
+      .filter(({ row }) => !row.name || !row.sede || !row.tipoUsuario)
+      .map(({ row }) => String(row.studentUid || row.id || '')))]
+      .filter(id => id && !/[.#$\[\]/\u0000-\u001f\u007f]/.test(id) && !profiles.has(id));
+    for (let offset = 0; offset < missing.length; offset += 8) {
+      await Promise.all(missing.slice(offset, offset + 8).map(async id => {
+        const values = await Promise.all(['students', 'guards', 'admins'].map(collection => db.ref(`${collection}/${id}`).get()));
+        profiles.set(id, values.reverse().find(value => value.exists())?.val() || {});
+      }));
+    }
     for (const { key, row } of entries) {
       cursor = { timestamp: row.timestamp, key };
       scanned++;
@@ -55,14 +69,7 @@ export async function readHistoryPage(db: Database, user: Viewer, query: Record<
       if (user.role === 'member' && id !== user.id) continue;
       if (user.role === 'guard' && row.validatedById !== user.uid && row.guardId !== user.id) continue;
       if (filters.outcome !== 'all' && (row.authorized === true) !== (filters.outcome === 'yes')) continue;
-      let person: any = {};
-      if (id && !/[.#$\[\]/\u0000-\u001f\u007f]/.test(id) && (!row.name || !row.sede || !row.tipoUsuario)) {
-        if (!profiles.has(id)) {
-          const values = await Promise.all(['students', 'guards', 'admins'].map(collection => db.ref(`${collection}/${id}`).get()));
-          profiles.set(id, values.reverse().find(value => value.exists())?.val() || {});
-        }
-        person = profiles.get(id);
-      }
+      const person: any = profiles.get(id) || {};
       const item = {
         key, id, name: String(row.name || row.studentName || person.name || id || 'Sin identificar'),
         timestamp: Number(row.timestamp), accessType: row.accessType || null,

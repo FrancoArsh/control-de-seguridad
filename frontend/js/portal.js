@@ -18,6 +18,7 @@ $('admin-qr-dialog').addEventListener('close', clearAdminQr);
 $('history-count').setAttribute('aria-live', 'polite');
 $('history-count').insertAdjacentHTML('afterend', '<nav class="history-pagination" aria-label="Páginas del historial"><button id="history-prev" type="button" title="Página anterior" aria-label="Página anterior" disabled>←</button><button id="history-next" type="button" title="Página siguiente" aria-label="Página siguiente" disabled>→</button></nav>');
 $('download-csv').textContent = 'CSV de esta página';
+$('guards-view').querySelector('.section-intro').insertAdjacentHTML('afterend', '<div id="guard-stats" class="stats"></div>');
 $('guards-view').querySelector('.table-scroll').insertAdjacentHTML('beforebegin', '<p id="guard-count" role="status"></p><nav class="history-pagination" aria-label="Páginas de turnos"><button id="guard-prev" type="button" aria-label="Página anterior" title="Página anterior" disabled>←</button><button id="guard-next" type="button" aria-label="Página siguiente" title="Página siguiente" disabled>→</button></nav>');
 $('guard-prev').onclick = () => loadGuardReport(false, guardPage - 1);
 $('guard-next').onclick = () => { if (guardNext) { guardCursors[guardPage + 1] = guardNext; loadGuardReport(false, guardPage + 1); } };
@@ -81,6 +82,7 @@ async function showLogin() {
   $('presence-rows').replaceChildren(); $('history-rows').replaceChildren();
   $('history-mobile').replaceChildren();
   $('user-rows').replaceChildren(); $('guard-rows').replaceChildren();
+  $('guard-stats').replaceChildren();
   $('scan-result').textContent = ''; $('qr-value').value = ''; $('user-password').value = '';
   history = []; presence = []; guards = [];
 }
@@ -122,7 +124,7 @@ async function navigate() {
       $('stats').innerHTML = user.role === 'member'
         ? stat('Mi estado', result.inside ? 'Dentro' : 'Fuera') + stat('Último movimiento', date(result.lastTimestamp))
         : user.role === 'guard' ? stat('Guardia', user.name) + stat('Identificador', user.id)
-        : stat('Personas dentro', result.insideCount) + stat('Perfil activo', $('role').textContent) + stat('Consulta realizada', new Date().toLocaleTimeString('es-CL'));
+        : stat('Personas dentro', result.insideCount) + guardStats(result.guardCounts);
       if (user.role === 'guard') await loadGuardShift();
     } else if (key === 'presence') {
       $('presence-rows').replaceChildren();
@@ -258,10 +260,12 @@ async function loadGuardReport(reset = false, target = guardPage) {
   if (guardCursors[target]) params.set('cursor', guardCursors[target]);
   $('guard-prev').disabled = $('guard-next').disabled = true;
   $('guard-count').textContent = 'Cargando turnos…';
+  $('guard-stats').replaceChildren();
   try {
     const result = await api(`/portal/guard-report?${params}`);
     if (request !== guardRequest || version !== viewVersion || !user) return;
     guards = result.data; guardPage = target; guardNext = result.nextCursor;
+    $('guard-stats').innerHTML = guardStats(result.guardCounts);
     renderGuards();
     $('guard-count').textContent = `Página ${target + 1} · ${guards.length} turnos${guards.some(v => v.countsComplete === false) ? ' · Conteo parcial: se muestran mínimos, no totales definitivos.' : ''}`;
     $('guard-prev').disabled = target === 0; $('guard-next').disabled = !guardNext;
@@ -274,6 +278,11 @@ async function loadGuardReport(reset = false, target = guardPage) {
 function renderGuards() {
   guards = guards.map(v => v.countsComplete === false ? { ...v, approvedAccesses: `≥ ${v.approvedAccesses}`, rejectedAccesses: `≥ ${v.rejectedAccesses}`, totalAccesses: `≥ ${v.totalAccesses} (parcial)` } : v);
   $('guard-rows').innerHTML = guards.map(v => `<tr><td>${escape(v.name)}<small class="subvalue">${escape(v.id)}</small></td><td>${escape(v.email || 'Sin correo asociado')}</td><td>${v.shiftActive ? '<span class="badge">Activo</span>' : v.shiftId ? '<span class="badge bad">Finalizado</span>' : 'Sin turno'}</td><td>${escape(date(v.startTimestamp))}</td><td>${escape(date(v.endTimestamp))}</td><td>${escape(v.approvedAccesses)}</td><td>${escape(v.rejectedAccesses)}</td><td>${escape(v.totalAccesses)}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">No hay guardias registrados.</td></tr>';
+}
+function guardStats(counts) {
+  return stat('Guardias registrados', counts?.total ?? 'No disponible')
+    + stat('Guardias activos', counts?.active ?? 'No disponible')
+    + stat('Guardias inactivos', counts?.inactive ?? 'No disponible');
 }
 async function loadGuardShift() {
   const panel = $('guard-shift-panel');

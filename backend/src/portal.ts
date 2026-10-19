@@ -7,6 +7,7 @@ import PDFDocument from 'pdfkit';
 import { startShift, endShift } from './shifts';
 import { withGuardOperation, GuardOperationBusy } from './guard-operation';
 import { readGuardReport } from './guard-report';
+import { readGuardSummary } from './guard-summary';
 import { HistoryInputError, readHistoryPage } from './history';
 
 type Profile = { uid: string; id: string; role: 'admin' | 'guard' | 'member'; name: string };
@@ -343,7 +344,7 @@ export function installPortal(app: Router, db: Database, qr: (id: string) => Pro
         return res.json({ ok: true, inside: state?.inside === true, lastTimestamp: state?.lastTimestamp || null });
       }
       const snapshot = (await db.ref('accessState').get()).val() || {};
-      res.json({ ok: true, insideCount: Object.values(snapshot).filter((v: any) => v.inside === true).length });
+      res.json({ ok: true, insideCount: Object.values(snapshot).filter((v: any) => v.inside === true).length, guardCounts: await readGuardSummary(db) });
     } catch { res.status(503).json({ ok: false, error: 'No se pudo cargar el resumen.' }); }
   });
   router.get('/guard/shift', async (req, res) => {

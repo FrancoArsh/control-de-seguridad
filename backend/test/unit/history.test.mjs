@@ -63,3 +63,18 @@ test('empty history and fixed upper bound', async () => {
   const page = await readHistoryPage(database(rows), admin, { to: '1000' });
   assert.equal(page.data.length, 3); assert.equal(page.nextCursor, null);
 });
+
+test('2025 events remain visible without modern fields or surviving profiles; raw tokens stay private', async () => {
+  const timestamp = Date.parse('2025-11-06T12:00:00Z');
+  const historic = [{ key: 'old', timestamp, id: 'archived-person', name: 'Historical name', authorized: true, reason: 'ok', token: 'must-not-leak' }];
+  const base = database(historic);
+  const db = { ref(path) { return path === 'accessHistory' ? base.ref(path) : { async get() { return { exists: () => false, val: () => null }; } }; } };
+  const page = await readHistoryPage(db, admin, {});
+  assert.equal(page.data.length, 1);
+  assert.equal(page.data[0].name, 'Historical name');
+  assert.equal(page.data[0].timestamp, timestamp);
+  assert.equal(page.data[0].authorized, true);
+  assert.equal(page.data[0].validatedBy, 'Sin registrar');
+  assert.equal(page.data[0].accessType, null);
+  assert.equal(page.data[0].token, undefined);
+});

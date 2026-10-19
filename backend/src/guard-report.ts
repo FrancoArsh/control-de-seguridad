@@ -1,4 +1,5 @@
 import type { Database } from 'firebase-admin/database';
+import { readGuardSummary } from './guard-summary';
 import { HistoryInputError, parseHistoryQuery } from './history';
 
 // Prefer explicit shift IDs; legacy events may only carry a guard and a timestamp.
@@ -58,6 +59,6 @@ export async function readGuardReport(db: Database, query: Record<string, any>) 
       approvedAccesses, rejectedAccesses, totalAccesses: approvedAccesses + rejectedAccesses, countsComplete, scanned });
   }
   const last = page[page.length - 1];
-  return { data, generatedAt, to: options.to, nextCursor: available.length > options.limit && last
+  return { data, guardCounts: await readGuardSummary(db), generatedAt, to: options.to, nextCursor: available.length > options.limit && last
     ? Buffer.from(JSON.stringify({ timestamp: last.startTimestamp, key: last.id })).toString('base64url') : null };
 }

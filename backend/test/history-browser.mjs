@@ -22,8 +22,8 @@ try {
       const url = new URL(route.request().url());
       if (url.hostname !== '127.0.0.1') return route.abort();
       if (url.pathname === '/portal/me') return route.fulfill(signedIn ? { json: { user: { id: role, uid: role, name: 'Persona de prueba con nombre extenso', role } } } : { status: 401, json: { error: 'Inicia sesion' } });
-      if (url.pathname === '/portal/summary') return route.fulfill({ json: { insideCount: 42 } });
-      if (url.pathname === '/portal/guard-report') return route.fulfill({ json: { data: [{ id: 'guard', name: url.searchParams.has('cursor') ? 'Segundo turno' : 'Primer turno', shiftId: 'shift', startTimestamp: 1000, approvedAccesses: 12, rejectedAccesses: 1, totalAccesses: 13, countsComplete: url.searchParams.has('cursor') }], nextCursor: url.searchParams.has('cursor') ? null : 'guard-cursor' } });
+      if (url.pathname === '/portal/summary') return route.fulfill({ json: { insideCount: 42, guardCounts: { total: 11, active: 10, inactive: 1 } } });
+      if (url.pathname === '/portal/guard-report') return route.fulfill({ json: { guardCounts: { total: 11, active: 10, inactive: 1 }, data: [{ id: 'guard', name: url.searchParams.has('cursor') ? 'Segundo turno' : 'Primer turno', shiftId: 'shift', startTimestamp: 1000, approvedAccesses: 12, rejectedAccesses: 1, totalAccesses: 13, countsComplete: url.searchParams.has('cursor') }], nextCursor: url.searchParams.has('cursor') ? null : 'guard-cursor' } });
       if (url.pathname === '/portal/guard/shift') return route.fulfill({ json: { active: false } });
       if (url.pathname === '/portal/users') return route.fulfill({ json: { data: [{ id: 'member-1', uid: 'uid-1', name: '<b>Nombre literal</b>', email: 'example@example.test', role: 'member', active: true }] } });
       if (url.pathname === '/portal/student-qr/member-1') return route.fulfill({ json: { name: '<b>Nombre literal</b>', qrDataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5HkAAAAASUVORK5CYII=', expiresAt: Date.now() + 1200 } });
@@ -71,6 +71,7 @@ try {
     assert.equal(await page.locator('#admin-qr-image').getAttribute('src'), null);
     await page.evaluate(() => { location.hash = '#guards'; });
     await page.locator('#guard-rows').getByText('Primer turno', { exact: false }).waitFor();
+    assert.equal(await page.locator('#guard-stats .stat strong').first().textContent(), '11');
     assert.match(await page.locator('#guard-count').innerText(), /Conteo parcial/);
     await page.locator('#guard-next').click();
     await page.locator('#guard-rows').getByText('Segundo turno', { exact: false }).waitFor();
