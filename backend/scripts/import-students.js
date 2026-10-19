@@ -1,13 +1,14 @@
 // backend/scripts/import-students.js
 const csv = require('csvtojson');
-const admin = require('firebase-admin');
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getDatabase } = require('firebase-admin/database');
 const fs = require('fs');
 const path = require('path');
 
 const serviceAccount = require(path.resolve(__dirname, '../serviceAccountKey.json'));
-admin.initializeApp({ credential: admin.credential.cert(serviceAccount), databaseURL: process.env.FIREBASE_DATABASE_URL });
+initializeApp({ credential: cert(serviceAccount), databaseURL: process.env.FIREBASE_DATABASE_URL });
 
-const db = admin.database();
+const db = getDatabase();
 const csvPath = process.argv[2] || path.resolve(__dirname, 'students.csv');
 
 async function importStudents() {

@@ -2,7 +2,8 @@
 // Uso: node backend/scripts/create-many-guards.js 10
 // Crea N guards en RTDB, genera PINs aleatorios, guarda pinHash y exporta guards-created.csv
 
-const admin = require('firebase-admin');
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getDatabase } = require('firebase-admin/database');
 const bcrypt = require('bcrypt');
 const fs = require('fs');
 const path = require('path');
@@ -17,12 +18,12 @@ if (!fs.existsSync(KEY_PATH)) {
 
 // Inicializa Firebase Admin
 const serviceAccount = require(KEY_PATH);
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
+initializeApp({
+  credential: cert(serviceAccount),
   databaseURL: process.env.FIREBASE_DATABASE_URL || "https://control-de-seguridad-b4fa7-default-rtdb.firebaseio.com/"
 });
 
-const db = admin.database();
+const db = getDatabase();
 
 function randomPin(digits = 6) {
   // genera PIN numérico con 'digits' cifras (puede tener ceros a la izquierda)

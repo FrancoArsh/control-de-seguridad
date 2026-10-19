@@ -1,6 +1,7 @@
 // backend/src/server.ts
 import express, { Request, Response, NextFunction } from "express";
-import admin from "firebase-admin";
+import { initializeApp, cert } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
 import { getDatabase } from 'firebase-admin/database';
 import dotenv from "dotenv";
 import fs from "fs";
@@ -13,6 +14,7 @@ import bcrypt from "bcrypt";
 import { installPortal } from './portal';
 import { validateStaging } from './environment';
 import { startShift, endShift } from './shifts';
+import { GuardOperationBusy } from './guard-operation';
 import { commitDynamicAccess, AccessPublicationPending, recoverPendingAccess } from './access-transaction';
 
 dotenv.config({ path: process.env.ENV_FILE || ".env" });
@@ -80,16 +82,16 @@ else if (!usingFirebaseEmulators) {
 // 3. Iniciamos Firebase
 validateStaging(process.env, serviceAccount);
 if (serviceAccount) {
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
+  initializeApp({
+    credential: cert(serviceAccount),
     databaseURL: FIREBASE_DB_URL,
   });
 } else {
   console.warn("⚠️ ADVERTENCIA: Iniciando SIN credenciales Admin. Algunas funciones fallarán.");
-  admin.initializeApp({ projectId: process.env.GCLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT, databaseURL: FIREBASE_DB_URL });
+  initializeApp({ projectId: process.env.GCLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT, databaseURL: FIREBASE_DB_URL });
 }
 
-const db = admin.database();
+const db = getDatabase();
 const app = express();
 const NODE_ENV = process.env.NODE_ENV || "development";
 const IS_PRODUCTION = NODE_ENV === "production";
@@ -143,7 +145,7 @@ async function guardEnabled(id: string) {
   if (!value || value.active === false) return false;
   const uid = value.authUid || value.uid;
   if (uid) {
-    const identity = await admin.auth().getUser(uid);
+    const identity = await getAuth().getUser(uid);
     const mapping = (await db.ref(`portalProfiles/${uid}`).get()).val();
     if (identity.disabled || mapping?.active === false) return false;
   }
@@ -162,12 +164,12 @@ async function requireFirebaseAdmin(req: Request, res: Response, next: NextFunct
     if (!m) return res.status(401).json({ ok:false, error: 'no token' });
     const idToken = m[1];
     // verifica token con Firebase Admin SDK
-    const decoded = await admin.auth().verifyIdToken(idToken, true);
+    const decoded = await getAuth().verifyIdToken(idToken, true);
     const uid = decoded.uid;
     // verifica que el uid sea admin en la RTDB
     const mapping = (await db.ref(`portalProfiles/${uid}`).get()).val();
     if (mapping && (mapping.active === false || mapping.role !== 'admin')) return res.status(403).json({ ok: false, error: 'not admin' });
-    const snap = await db.ref(`admins/${mapping?.id || uid}`).once('value');
+    const snap = await db.ref(`admins/${mapping?.id || uid}`).get();
     if (!snap.exists()) return res.status(403).json({ ok:false, error: 'not admin' });
     const profile = snap.val();
     if (profile.role !== 'admin' || profile.active === false) return res.status(403).json({ ok:false, error:'not admin role' });
@@ -204,11 +206,11 @@ async function requireAdminOrGuard(req: Request, res: Response, next: NextFuncti
   }
 
   try {
-    const decoded = await admin.auth().verifyIdToken(token, true);
+    const decoded = await getAuth().verifyIdToken(token, true);
     const uid = decoded.uid;
     const mapping = (await db.ref(`portalProfiles/${uid}`).get()).val();
     if (mapping && (mapping.active === false || mapping.role !== 'admin')) return res.status(403).json({ ok: false, error: 'not admin' });
-    const snap = await db.ref(`admins/${mapping?.id || uid}`).once("value");
+    const snap = await db.ref(`admins/${mapping?.id || uid}`).get();
     if (!snap.exists()) return res.status(403).json({ ok: false, error: "not admin" });
     const profile = snap.val();
     if (profile.role !== "admin" || profile.active === false) return res.status(403).json({ ok: false, error: "not admin role" });
@@ -241,7 +243,7 @@ function safeCompareString(a: string, b: string) {
 async function migrateExpiredTempPins() {
   try {
     const now = Date.now();
-    const snap = await db.ref('guards').once('value');
+    const snap = await db.ref('guards').get();
     // Tipado explícito para que TypeScript sepa que podemos indexar por id
     const guards: Record<string, any> = snap.val() || {};
     const updates: Record<string, any> = {};
@@ -362,7 +364,7 @@ function verifyDynamicQrToken(token: string): { ok: true; payload: DynamicQrPayl
 async function cleanupExpiredQrNonces() {
   try {
     const now = Date.now();
-    const snap = await db.ref("dynamicQrNonces").orderByChild('expiresAt').endAt(now).limitToFirst(500).once("value");
+    const snap = await db.ref("dynamicQrNonces").orderByChild('expiresAt').endAt(now).limitToFirst(500).get();
     const expired = Object.fromEntries(Object.entries(snap.val() || {}).filter(([, value]: [string, any]) => Number(value?.expiresAt || 0) <= now).slice(0, 500));
     const updates: Record<string, null> = {};
     for (const nonce of Object.keys(expired)) {
@@ -399,7 +401,7 @@ accessRecoveryTimer.unref?.();
 void recoverAccess();
 
 async function resolveStaticAccessToken(token: string) {
-  let tokenNodeSnap = await db.ref('accessTokens').orderByChild('token').equalTo(token).once('value');
+  let tokenNodeSnap = await db.ref('accessTokens').orderByChild('token').equalTo(token).get();
   let foundKey: string | null = null;
   let tokenData: any = null;
 
@@ -409,7 +411,7 @@ async function resolveStaticAccessToken(token: string) {
     foundKey = keys[0];
     tokenData = val[foundKey];
   } else {
-    const altSnap = await db.ref('tokens').orderByChild('token').equalTo(token).once('value');
+    const altSnap = await db.ref('tokens').orderByChild('token').equalTo(token).get();
     if (altSnap.exists()) {
       const v = altSnap.val();
       const keys2 = Object.keys(v);
@@ -436,7 +438,7 @@ async function commitAccessTransition(userId: string, requestedType: string, ses
   // Keep the server value cached while the transaction can retry.
   const keepState = () => {};
   stateRef.on('value', keepState, () => {});
-  const result = await stateRef.once('value').then(() => stateRef.transaction((current: any) => {
+  const result = await stateRef.get().then(() => stateRef.transaction((current: any) => {
     const state = current && typeof current === "object" ? current : {};
     const previousInside = state.inside === true;
 
@@ -648,8 +650,8 @@ app.get("/health", (_req, res) => {
 
 async function getCurrentPresence() {
   const [stateSnap, studentsSnap] = await Promise.all([
-    db.ref("accessState").once("value"),
-    db.ref("students").once("value")
+    db.ref("accessState").get(),
+    db.ref("students").get()
   ]);
   const states = stateSnap.val() || {};
   const students = studentsSnap.val() || {};
@@ -702,10 +704,10 @@ app.get("/admin/metrics", requireFirebaseAdmin, async (req, res) => {
     const weekStart = now - 7 * 24 * 60 * 60 * 1000;
 
     const [historySnap, shiftsSnap, usersSnap, guardsSnap, presence] = await Promise.all([
-      db.ref("accessHistory").orderByChild("timestamp").startAt(weekStart).once("value"),
-      db.ref("guardShifts").once("value"),
-      db.ref("students").once("value"),
-      db.ref("guards").once("value"),
+      db.ref("accessHistory").orderByChild("timestamp").startAt(weekStart).get(),
+      db.ref("guardShifts").get(),
+      db.ref("students").get(),
+      db.ref("guards").get(),
       getCurrentPresence()
     ]);
 
@@ -753,7 +755,7 @@ app.get("/admin/metrics", requireFirebaseAdmin, async (req, res) => {
 app.get("/admin/audit-log", requireFirebaseAdmin, async (_req, res) => {
   try {
     const limit = sanitizeLimit(_req.query.limit, 100, 500);
-    const snap = await db.ref("adminAuditLog").orderByChild("timestamp").limitToLast(limit).once("value");
+    const snap = await db.ref("adminAuditLog").orderByChild("timestamp").limitToLast(limit).get();
     const val = snap.val() || {};
     const data = Object.keys(val)
       .map(k => ({ id: k, ...(val[k] || {}) }))
@@ -835,7 +837,7 @@ app.post("/validate", async (req, res, next) => {
       return res.status(404).json({ ok: false, error: "token not found", reason: "token not found" });
     }
 
-    const studentSnap = await db.ref(`students/${foundKey}`).once("value");
+    const studentSnap = await db.ref(`students/${foundKey}`).get();
     if (!studentSnap.exists()) {
       await logAccess({ request: req, id: foundKey, studentUid: foundKey, authorized: false, reason: "user not found", sessionId, validationMode, qrVersion });
       return res.status(404).json({ ok: false, error: "user not found", reason: "user not found" });
@@ -983,6 +985,7 @@ app.post("/validate", async (req, res, next) => {
       return res.status(503).json({ ok: false, reason: 'ACCESS_PUBLICATION_PENDING', eventId: err.eventId,
         error: 'Movimiento registrado, auditoria pendiente de recuperacion. Consulte el estado antes de repetir.' });
     }
+    if (err instanceof GuardOperationBusy) return res.status(503).json({ ok: false, reason: 'GUARD_OPERATION_BUSY', error: 'Guardia ocupado o bloqueo pendiente de revision. No se registro este acceso.' });
     console.error("validate error:", err);
     await logAccess({ request: req, authorized: false, reason: "server error", sessionId });
     return res.status(500).json({ ok: false, error: "server error" });
@@ -1044,7 +1047,7 @@ app.get("/history", requireFirebaseAdmin, async (req: Request, res: Response) =>
     const guardIdQ = String(req.query.guardId || "").trim();
     const shiftIdQ = String(req.query.shiftId || "").trim();
     // Cargamos accessHistory (limitar lectura es posible si la DB crece)
-    const ahSnap = await db.ref("accessHistory").orderByChild("timestamp").limitToLast(10000).once("value");
+    const ahSnap = await db.ref("accessHistory").orderByChild("timestamp").limitToLast(10000).get();
     const ahVal = ahSnap.val() || {};
     let rows = Object.keys(ahVal).map(k => ({ key: k, ...ahVal[k] as any }));
 
@@ -1052,11 +1055,11 @@ app.get("/history", requireFirebaseAdmin, async (req: Request, res: Response) =>
     let gaIds: string[] = [];
     let guardShiftIds: string[] = [];
     if (guardIdQ) {
-      const gaSnap = await db.ref("guardAuthorizations").orderByChild("guardId").equalTo(guardIdQ).once("value");
+      const gaSnap = await db.ref("guardAuthorizations").orderByChild("guardId").equalTo(guardIdQ).get();
       const gaVal = gaSnap.val() || {};
       gaIds = Object.keys(gaVal);
 
-      const gsSnap = await db.ref("guardShifts").orderByChild("guardId").equalTo(guardIdQ).once("value");
+      const gsSnap = await db.ref("guardShifts").orderByChild("guardId").equalTo(guardIdQ).get();
       const gsVal = gsSnap.val() || {};
       guardShiftIds = Object.keys(gsVal);
 
@@ -1084,18 +1087,18 @@ app.get("/history", requireFirebaseAdmin, async (req: Request, res: Response) =>
       // studentName
       if (r.id) {
         try {
-          const s = await db.ref(`students/${r.id}`).once("value");
+          const s = await db.ref(`students/${r.id}`).get();
           if (s.exists()) r.studentName = s.val().name || null;
         } catch (_) { /* ignore */ }
       }
       // guardOverrideId -> agregar guardId/guardName
       if (r.guardOverrideId) {
         try {
-          const ga = await db.ref(`guardAuthorizations/${r.guardOverrideId}`).once("value");
+          const ga = await db.ref(`guardAuthorizations/${r.guardOverrideId}`).get();
           if (ga.exists()) {
             const gav = ga.val();
             r.guardId = gav.guardId || r.guardId || null;
-            const gSnap = await db.ref(`guards/${gav.guardId}`).once("value");
+            const gSnap = await db.ref(`guards/${gav.guardId}`).get();
             if (gSnap.exists()) r.guardName = gSnap.val().name || null;
           }
         } catch (_) { /* ignore */ }
@@ -1103,7 +1106,7 @@ app.get("/history", requireFirebaseAdmin, async (req: Request, res: Response) =>
       // shift info si existe shiftId
       if (r.shiftId) {
         try {
-          const sSnap = await db.ref(`guardShifts/${r.shiftId}`).once("value");
+          const sSnap = await db.ref(`guardShifts/${r.shiftId}`).get();
           if (sSnap.exists()) r.shift = sSnap.val();
         } catch (_) { /* ignore */ }
       }
@@ -1127,7 +1130,7 @@ app.get("/user/:id", requireAdminOrGuard, async (req, res) => {
     let name: string | null = null;
     let role: string | null = null;
     try {
-      const sSnap = await db.ref(`students/${id}`).once("value");
+      const sSnap = await db.ref(`students/${id}`).get();
       if (sSnap.exists()) {
         const sVal = sSnap.val();
         name = sVal.name || null;
@@ -1139,11 +1142,11 @@ app.get("/user/:id", requireAdminOrGuard, async (req, res) => {
 
     let token: string | null = null;
     try {
-      const tSnap = await db.ref(`accessTokens/${id}`).once("value");
+      const tSnap = await db.ref(`accessTokens/${id}`).get();
       if (tSnap.exists()) {
         token = String(tSnap.val().token || "");
       } else {
-        const alt = await db.ref(`tokens/${id}`).once("value");
+        const alt = await db.ref(`tokens/${id}`).get();
         if (alt.exists()) token = String(alt.val().token || "");
       }
     } catch (e) {
@@ -1177,7 +1180,7 @@ app.get("/user/:id", requireAdminOrGuard, async (req, res) => {
 app.get("/users", requireFirebaseAdmin, async (req, res) => {
   try {
     const qRole = String(req.query.role || "").trim().toLowerCase();
-    const studentsSnap = await db.ref("students").once("value");
+    const studentsSnap = await db.ref("students").get();
     const studentsVal = studentsSnap.val() || {};
     const ids = Object.keys(studentsVal);
 
@@ -1227,7 +1230,7 @@ app.post("/users",requireFirebaseAdmin, async (req, res) => {
 
     await db.ref(`students/${id}`).update({ name, role });
 
-    const tokenSnap = await db.ref(`accessTokens/${id}`).once("value");
+    const tokenSnap = await db.ref(`accessTokens/${id}`).get();
     if (regenerate === true || !tokenSnap.exists()) {
       token = crypto.randomBytes(12).toString("hex");
       await db.ref(`accessTokens/${id}`).set({ token, createdAt: Date.now() });
@@ -1286,11 +1289,11 @@ app.put("/users/:id",requireFirebaseAdmin, async (req, res) => {
       token = crypto.randomBytes(12).toString("hex");
       await db.ref(`accessTokens/${id}`).set({ token, createdAt: Date.now() });
     } else {
-      const tSnap = await db.ref(`accessTokens/${id}`).once("value");
+      const tSnap = await db.ref(`accessTokens/${id}`).get();
       if (tSnap.exists()) token = String(tSnap.val().token || null);
     }
 
-    const sSnap = await db.ref(`students/${id}`).once("value");
+    const sSnap = await db.ref(`students/${id}`).get();
     const student = sSnap.exists() ? sSnap.val() : {};
 
     const dynamic = createDynamicQrToken(id);
@@ -1370,7 +1373,7 @@ app.post('/guard/login', async (req, res) => {
 
     await migrateExpiredTempPins();
 
-    const gSnap = await db.ref(`guards/${guardId}`).once('value');
+    const gSnap = await db.ref(`guards/${guardId}`).get();
     if (!gSnap.exists()) {
       recordGuardLoginFailure(req, guardId);
       await logSecurityEvent({
@@ -1513,7 +1516,7 @@ app.post("/guard/shift/end", requireGuard, async (req, res) => {
     }
 
     if (shiftId) {
-      const sSnap = await db.ref(`guardShifts/${shiftId}`).once("value");
+      const sSnap = await db.ref(`guardShifts/${shiftId}`).get();
       if (!sSnap.exists()) return res.status(404).json({ ok:false, error:"shift not found" });
       const shift = sSnap.val();
       if (String(shift.guardId) !== String(guardId)) return res.status(403).json({ ok:false, error:"not owner of shift" });
@@ -1525,7 +1528,7 @@ app.post("/guard/shift/end", requireGuard, async (req, res) => {
     }
 
     // buscar shift activo más reciente para este guard
-    const snap = await db.ref("guardShifts").orderByChild("guardId").equalTo(guardId).once("value");
+    const snap = await db.ref("guardShifts").orderByChild("guardId").equalTo(guardId).get();
     const val = snap.val() || {};
     const openShifts = Object.keys(val)
       .map(k => ({ id: k, ...(val[k] || {}) }))
@@ -1555,7 +1558,7 @@ app.get("/guardShifts", requireAdminOrGuard, async (req, res) => {
     const isAdmin = !!(req as any).admin;
     const guardIdQ = requesterGuardId || String(req.query.guardId || "").trim();
     const activeQ = String(req.query.active || "").toLowerCase(); // "true"|"false"|""
-    const snap = await db.ref("guardShifts").once("value");
+    const snap = await db.ref("guardShifts").get();
     const val = snap.val() || {};
     let arr = Object.keys(val).map(k => ({ id: k, ...(val[k] || {}) }));
     if (guardIdQ) arr = arr.filter(s => String(s.guardId) === guardIdQ);
@@ -1576,7 +1579,7 @@ app.get("/guardAuthorizations", requireAdminOrGuard, async (req, res) => {
   try {
     const requesterGuardId = (req as any).guard?.id ? String((req as any).guard.id) : "";
     const guardId = requesterGuardId || String(req.query.guardId || "").trim();
-    const snap = await db.ref("guardAuthorizations").once("value");
+    const snap = await db.ref("guardAuthorizations").get();
     const val = snap.val() || {};
     const arr = Object.keys(val).map(k => ({ id: k, ...val[k] }));
     const filtered = guardId ? arr.filter(a => a.guardId === guardId) : arr;
@@ -1590,7 +1593,7 @@ app.get("/guardAuthorizations", requireAdminOrGuard, async (req, res) => {
 // GET /guards  (requireAdmin)
 app.get('/guards',requireFirebaseAdmin, async (req, res) => {
   try {
-    const snap = await db.ref('guards').once('value');
+    const snap = await db.ref('guards').get();
     const val = snap.val() || {};
     const out = Object.keys(val).map(k => ({ id: k, name: val[k].name || null }));
     return res.json({ ok:true, count: out.length, data: out });
@@ -1617,7 +1620,7 @@ app.get('/api/guards/:id/pin', requireFirebaseAdmin, async (_req, res) => {
 // GET /teachers
 app.get("/teachers",requireFirebaseAdmin, async (req, res) => {
   try {
-    const snap = await db.ref("teachers").once("value");
+    const snap = await db.ref("teachers").get();
     const val = snap.val() || {};
     const ids = Object.keys(val);
     const out = await Promise.all(ids.map(async id => {
@@ -1714,7 +1717,7 @@ app.get('/admins',requireFirebaseAdmin, async (req, res) => {
     // DEBUG: mostrar el header que vino en la petición
     console.log('DEBUG /admins -> x-admin-secret header:', req.headers['x-admin-secret'] ? '[present]' : '[missing]');
 
-    const snap = await db.ref('admins').once('value');
+    const snap = await db.ref('admins').get();
     const val = snap.val() || {};
 
     // DEBUG: keys encontradas en la DB
@@ -1749,7 +1752,7 @@ app.get('/admins',requireFirebaseAdmin, async (req, res) => {
 app.get('/debug/admins', requireFirebaseAdmin, async (req, res) => {
   if (IS_PRODUCTION) return res.status(404).json({ ok: false, error: "not found" });
   try {
-    const snap = await db.ref('admins').once('value');
+    const snap = await db.ref('admins').get();
     const val = snap.val() || {};
     const sanitized = Object.keys(val || {}).map(k => ({
       id: String(val[k]?.id || k),
@@ -1799,7 +1802,7 @@ app.post('/admin/guard/shift/end',requireFirebaseAdmin, async (req, res) => {
     const { guardId, shiftId, notes } = req.body || {};
 
     if (shiftId) {
-      const sSnap = await db.ref(`guardShifts/${shiftId}`).once("value");
+      const sSnap = await db.ref(`guardShifts/${shiftId}`).get();
       if (!sSnap.exists()) return res.status(404).json({ ok:false, error: 'shift not found' });
       const shift = sSnap.val();
       if (shift.endTimestamp) return res.status(400).json({ ok:false, error: 'shift already ended' });
@@ -1817,7 +1820,7 @@ app.post('/admin/guard/shift/end',requireFirebaseAdmin, async (req, res) => {
 
     if (!guardId) return res.status(400).json({ ok:false, error: 'guardId or shiftId required' });
 
-    const snap = await db.ref("guardShifts").orderByChild("guardId").equalTo(guardId).once("value");
+    const snap = await db.ref("guardShifts").orderByChild("guardId").equalTo(guardId).get();
     const val = snap.val() || {};
     const openShifts = Object.keys(val)
       .map(k => ({ id: k, ...(val[k] || {}) }))
@@ -1851,7 +1854,7 @@ app.post("/admin/guards/:id/reset-pin", requireFirebaseAdmin, async (req, res) =
     if (!id) return res.status(400).json({ ok:false, error:"missing id" });
 
     // Verificar que el guard exista
-    const gSnap = await db.ref(`guards/${id}`).once("value");
+    const gSnap = await db.ref(`guards/${id}`).get();
     if (!gSnap.exists()) return res.status(404).json({ ok:false, error:"guard not found" });
 
     const clientSecret = req.headers['x-admin-secret'];
@@ -1860,7 +1863,7 @@ app.post("/admin/guards/:id/reset-pin", requireFirebaseAdmin, async (req, res) =
     }
 
     // Generar PIN temporal: 6 dígitos
-    const tempPin = Math.floor(100000 + Math.random() * 900000).toString();
+    const tempPin = crypto.randomInt(100000, 1000000).toString();
     const saltRounds = 10;
     const hash = await bcrypt.hash(tempPin, saltRounds);
 
@@ -1900,7 +1903,7 @@ app.post("/admin/guards/:id/reset-pin", requireFirebaseAdmin, async (req, res) =
 // GET /admin/guards  (mejorado) - requiere requireAdmin
 app.get("/admin/guards",requireFirebaseAdmin, async (req, res) => {
   try {
-    const snap = await db.ref('guards').once('value');
+    const snap = await db.ref('guards').get();
     const val = snap.val() || {};
     const ids = Object.keys(val);
     const out = await Promise.all(ids.map(async id => {
@@ -1942,7 +1945,7 @@ app.put("/admins/:id",requireFirebaseAdmin, async (req, res) => {
   }
 });
 
-const rtdb = admin.database();
+const rtdb = getDatabase();
 
 app.put('/api/admins/:id', requireFirebaseAdmin, async (req, res) => {
     // 1. Obtener el ID del administrador de la URL (ruta param)
@@ -2003,12 +2006,12 @@ app.get("/shift/:shiftId/history",requireFirebaseAdmin, async (req, res) => {
   try {
     const shiftId = String(req.params.shiftId || "");
     if (!shiftId) return res.status(400).json({ ok: false, error: "missing shiftId" });
-    const sSnap = await db.ref(`guardShifts/${shiftId}`).once("value");
+    const sSnap = await db.ref(`guardShifts/${shiftId}`).get();
     if (!sSnap.exists()) return res.status(404).json({ ok: false, error: "shift not found" });
     const shift = sSnap.val();
     const start = Number(shift.startTimestamp || 0);
     const end = Number(shift.endTimestamp || (Date.now() + 1000*60*60*24));
-    const ahSnap = await db.ref("accessHistory").once("value");
+    const ahSnap = await db.ref("accessHistory").get();
     const ah = ahSnap.val() || {};
     const rows = Object.keys(ah)
       .map(k => ({ id: k, ...ah[k] }))
@@ -2019,7 +2022,7 @@ app.get("/shift/:shiftId/history",requireFirebaseAdmin, async (req, res) => {
       .sort((a:any,b:any)=> (a.timestamp||0) - (b.timestamp||0));
     const enriched = await Promise.all(rows.map(async (r: any) => {
       if (r.id) {
-        const s = await db.ref(`students/${r.id}`).once("value");
+        const s = await db.ref(`students/${r.id}`).get();
         r.studentName = s.exists() ? s.val().name : null;
       }
       return r;
@@ -2037,11 +2040,11 @@ app.post('/guards/create', requireFirebaseAdmin, async (req, res) => {
     if (!id || !name || !pin) return res.status(400).json({ ok: false, error: 'missing fields' });
 
     const hash = await bcrypt.hash(pin, 10);
-    await db.ref(`guards/${id}`).set({
-      name,
-      pinHash: hash,
-      createdAt: Date.now()
-    });
+    if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) return res.status(400).json({ ok: false, error: 'invalid id' });
+    const created = await db.ref(`guards/${id}`).transaction(current => current ? undefined : {
+      name, pinHash: hash, active: true, createdAt: Date.now()
+    }, undefined, false);
+    if (!created.committed) return res.status(409).json({ ok: false, error: 'guard already exists' });
 
     await logAdminAction(req, {
       action: "guard.create",

@@ -1,20 +1,22 @@
-import admin from 'firebase-admin';
+import { initializeApp, cert, getApp, deleteApp } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
+import { getDatabase } from 'firebase-admin/database';
 import dotenv from 'dotenv';
 import fs from 'node:fs';
 
 dotenv.config();
 const serviceAccount = JSON.parse(fs.readFileSync(new URL('../serviceAccountKey.json', import.meta.url), 'utf8'));
-admin.initializeApp({ credential: admin.credential.cert(serviceAccount), databaseURL: process.env.FIREBASE_DATABASE_URL });
-const db = admin.database();
+initializeApp({ credential: cert(serviceAccount), databaseURL: process.env.FIREBASE_DATABASE_URL });
+const db = getDatabase();
 const ids = new Set(['demo-qr-001', 'demo-qr-002', 'demo-qr-003', 'demo-qr-004', 'demo-qr-005']);
 const emails = new Set(['qr.demo.001@controlseguridad.test', 'qr.demo.002@controlseguridad.test', 'qr.demo.003@controlseguridad.test', 'qr.demo.004@controlseguridad.test', 'qr.demo.005@controlseguridad.test']);
 const authUsers = [];
 let page;
 do {
-  page = await admin.auth().listUsers(1000, page?.pageToken);
+  page = await getAuth().listUsers(1000, page?.pageToken);
   for (const user of page.users) if (emails.has(user.email || '')) authUsers.push(user);
 } while (page.pageToken);
-for (const user of authUsers) await admin.auth().deleteUser(user.uid);
+for (const user of authUsers) await getAuth().deleteUser(user.uid);
 
 const root = await db.ref().get();
 const data = root.val() || {};
@@ -40,4 +42,4 @@ for (const [key, value] of Object.entries(data.portalSessions || {})) {
 }
 await db.ref().update(updates);
 console.log(JSON.stringify({ ok: true, deletedAuthUsers: authUsers.map(user => user.email), removedDatabasePaths: Object.keys(updates).length }, null, 2));
-await admin.app().delete();
+await deleteApp(getApp());

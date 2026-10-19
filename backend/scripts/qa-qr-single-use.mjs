@@ -1,4 +1,6 @@
-import admin from 'firebase-admin';
+import { initializeApp, cert, getApp, deleteApp } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
+import { getDatabase } from 'firebase-admin/database';
 import dotenv from 'dotenv';
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
@@ -13,8 +15,8 @@ if (!password || !pin) throw new Error('Configura QA_PASSWORD y QA_GUARD_PIN par
 const port = process.env.QA_PORT || '3127';
 const baseUrl = `http://127.0.0.1:${port}`;
 const serviceAccount = JSON.parse(fs.readFileSync(new URL('../serviceAccountKey.json', import.meta.url), 'utf8'));
-admin.initializeApp({ credential: admin.credential.cert(serviceAccount), databaseURL: process.env.FIREBASE_DATABASE_URL });
-const db = admin.database();
+initializeApp({ credential: cert(serviceAccount), databaseURL: process.env.FIREBASE_DATABASE_URL });
+const db = getDatabase();
 const server = spawn(process.execPath, ['dist/server.js'], { env: { ...process.env, PORT: port }, stdio: 'ignore' });
 const closed = new Promise(resolve => server.once('exit', resolve));
 const cookies = [];
@@ -27,9 +29,9 @@ async function prepareQaAccounts() {
     const id = `demo-qr-${suffix}`;
     const email = `qr.demo.${suffix}@controlseguridad.test`;
     let record;
-    try { record = await admin.auth().getUserByEmail(email); }
-    catch { record = await admin.auth().createUser({ email, password, displayName: `Usuario QA QR ${i}` }); }
-    await admin.auth().updateUser(record.uid, { password, displayName: `Usuario QA QR ${i}`, disabled: false });
+    try { record = await getAuth().getUserByEmail(email); }
+    catch { record = await getAuth().createUser({ email, password, displayName: `Usuario QA QR ${i}` }); }
+    await getAuth().updateUser(record.uid, { password, displayName: `Usuario QA QR ${i}`, disabled: false });
     await db.ref(`students/${id}`).set({ name: `Usuario QA QR ${i}`, role: 'estudiante', email, authUid: record.uid, active: true, createdAt: Date.now() });
     await db.ref(`portalProfiles/${record.uid}`).set({ id, role: 'member', active: true });
   }
@@ -115,5 +117,5 @@ try {
   for (const headers of cookies) await request('/portal/logout', {}, headers).catch(() => {});
   server.kill();
   await closed;
-  await admin.app().delete();
+  await deleteApp(getApp());
 }

@@ -17,13 +17,14 @@ const databaseUrl = `http://${emulatorHost}?ns=${projectId}`;
 const port = Number(process.env.INTEGRATION_PORT || 3101);
 const baseUrl = `http://127.0.0.1:${port}`;
 let server;
+let serverErrors = '';
 let seedApp;
 let portalCookie = "";
 
 async function waitForHealth() {
   for (let attempt = 0; attempt < 40; attempt += 1) {
     try {
-      const response = await fetch(`${baseUrl}/health`);
+      const response = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(2000) });
       if (response.ok) return;
     } catch (_) {
       // El proceso todavía puede estar iniciando.
@@ -35,10 +36,13 @@ async function waitForHealth() {
 
 async function request(pathname, options = {}) {
   const response = await fetch(`${baseUrl}${pathname}`, {
+    signal: AbortSignal.timeout(15000),
     ...options,
     headers: { "content-type": "application/json", ...(options.headers || {}) }
   });
-  return { response, body: await response.json() };
+  const body = await response.json();
+  if (response.status >= 500) console.error('Emulator backend diagnostic:', serverErrors);
+  return { response, body };
 }
 
 async function portalRequest(pathname, options = {}) {
@@ -111,6 +115,8 @@ before(async () => {
     },
     stdio: "pipe"
   });
+  server.stderr.on('data', chunk => { serverErrors = (serverErrors + chunk.toString()).slice(-8000); });
+  server.stdout.resume();
   await waitForHealth();
 });
 
@@ -147,6 +153,9 @@ test('QR dinamico: concurrencia, replay, salida y auditoria', async () => {
   assert.equal((await db.ref('accessState/dynamic-person').get()).val().inside, true);
   const replay = await validate(headers, qr);
   assert.equal(replay.response.status, 409);
+  for (let attempt = 0; attempt < 10; attempt++) {
+    assert.equal((await validate(headers, qr)).response.status, 409, serverErrors);
+  }
   await db.ref('accessState/dynamic-person/lastTimestamp').set(0);
   await db.ref('students/dynamic-person/lastAccessTimestamp').set(0);
   const exits = await Promise.all(Array.from({ length: 6 }, () => validate(headers, signedQr('dynamic-person'), 'exit')));
@@ -172,7 +181,7 @@ test('rechaza QR vencido, adulterado, futuro, desactivado y peticion sin token',
   assert.equal((await validate(headers, '')).response.status, 400);
   const db = getDatabase(seedApp);
   await db.ref('students/dynamic-person/active').set(false);
-  assert.equal((await validate(headers, signedQr('dynamic-person'))).response.status, 403);
+  assert.equal((await validate(headers, signedQr('dynamic-person'))).response.status, 403, serverErrors);
   await db.ref('students/dynamic-person/active').set(true);
   const rows = Object.values((await db.ref('accessHistory').get()).val() || {});
   for (const reason of ['qr expired', 'invalid qr signature', 'invalid qr lifetime', 'token required', 'user disabled']) {
@@ -344,6 +353,12 @@ test("autentica el portal y aplica la sesion y el rol de administrador", async (
   assert.equal(closedShift.endedBy, login.body.user.uid);
   const winner = closures.findIndex(r => r.response.status === 200);
   assert.equal(closedShift.notes, `winner-${winner}`);
+  const originalGuard = (await db.ref('guards/guard-001').get()).val();
+  const overwrite = await portalRequest('/guards/create', {
+    method: 'POST', body: JSON.stringify({ id: 'guard-001', name: 'Must not replace', pin: '987654' })
+  });
+  assert.equal(overwrite.response.status, 409);
+  assert.deepEqual((await db.ref('guards/guard-001').get()).val(), originalGuard);
 
   const logout = await portalRequest("/portal/logout", { method: "POST", body: "{}" });
   assert.equal(logout.response.status, 200);

@@ -1,6 +1,11 @@
-import admin from 'firebase-admin';
+import type { Database } from 'firebase-admin/database';
+import { withGuardOperation } from './guard-operation';
 
-export async function endShift(db: admin.database.Database, guardId: string, shiftId: string, actor: string, notes?: string) {
+export async function endShift(db: Database, guardId: string, shiftId: string, actor: string, notes?: string) {
+  return withGuardOperation(db, guardId, 'end-shift', () => endShiftLocked(db, guardId, shiftId, actor, notes));
+}
+
+async function endShiftLocked(db: Database, guardId: string, shiftId: string, actor: string, notes?: string) {
   if (!shiftId || /[.#$\[\]/\u0000-\u001f\u007f]/.test(shiftId)) throw new Error('Invalid shift identifier');
   const ref = db.ref(`guardShifts/${shiftId}`);
   // Warm the transaction cache so a missing initial local snapshot is not mistaken for a missing shift.
@@ -17,7 +22,15 @@ export async function endShift(db: admin.database.Database, guardId: string, shi
   } finally { ref.off('value', listener); }
 }
 
-export async function startShift(db: admin.database.Database, guardId: string, actor: string, notes: string) {
+export async function startShift(db: Database, guardId: string, actor: string, notes: string) {
+  return withGuardOperation(db, guardId, 'start-shift', async () => {
+    const guard = (await db.ref(`guards/${guardId}`).get()).val();
+    if (!guard || guard.active === false) throw new Error('Guard disabled');
+    return startShiftLocked(db, guardId, actor, notes);
+  });
+}
+
+async function startShiftLocked(db: Database, guardId: string, actor: string, notes: string) {
   const ref = db.ref('guardShifts');
   const id = ref.push().key!;
   const shift = { guardId, createdBy: actor, startTimestamp: Date.now(), active: true, notes: notes.slice(0, 500) };

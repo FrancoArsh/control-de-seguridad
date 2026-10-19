@@ -1,6 +1,7 @@
 // backend/scripts/create-tokens.js
 require("dotenv").config();
-const admin = require("firebase-admin");
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getDatabase } = require('firebase-admin/database');
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
@@ -9,12 +10,12 @@ const QRCode = require("qrcode");
 const SERVICE_ACCOUNT = path.resolve(__dirname, "../serviceAccountKey.json");
 const serviceAccount = JSON.parse(fs.readFileSync(SERVICE_ACCOUNT, "utf8"));
 
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
+initializeApp({
+  credential: cert(serviceAccount),
   databaseURL: process.env.FIREBASE_DATABASE_URL,
 });
 
-const db = admin.database();
+const db = getDatabase();
 const tokensRef = db.ref("accessTokens");
 
 (async () => {

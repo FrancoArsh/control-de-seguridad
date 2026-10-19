@@ -1,4 +1,5 @@
 import type { Database } from 'firebase-admin/database';
+import { withGuardOperation } from './guard-operation';
 
 type Root = Record<string, any>;
 export type AccessCommand = {
@@ -70,6 +71,11 @@ export function applyDynamicAccess(current: Root, command: AccessCommand, now: n
 }
 
 export async function commitDynamicAccess(db: Database, command: AccessCommand): Promise<AccessResult> {
+  const run = () => commitPersonAccess(db, command);
+  return command.audit.guardId ? withGuardOperation(db, command.audit.guardId, 'validate', run) : run();
+}
+
+async function commitPersonAccess(db: Database, command: AccessCommand): Promise<AccessResult> {
   const ref = db.ref(`accessState/${command.userId}`);
   const keepCached = () => {};
   let decision: AccessResult = { ok: false, reason: 'access state conflict' };
@@ -85,8 +91,8 @@ export async function commitDynamicAccess(db: Database, command: AccessCommand):
         db.ref(`dynamicQrNonces/${command.nonce}`).get()
       ]);
       await ref.get();
-      // Authorization is checked at request time. Only this person's state and nonce
-      // consumption participate in the transaction, not global profiles or shifts.
+      // Guard lifecycle changes share the outer guard lock. Member revocation
+      // shares this person's transaction through accessDisabled.
       const result = await ref.transaction(current => {
         const state = current || {};
         if (state._usedQrNonces?.[command.nonce]) { decision = { ok: false, reason: 'qr already used' }; return; }

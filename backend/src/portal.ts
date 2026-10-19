@@ -1,9 +1,11 @@
 import { Router, Request, Response, NextFunction } from 'express';
-import admin from 'firebase-admin';
+import { getAuth } from 'firebase-admin/auth';
+import type { Database } from 'firebase-admin/database';
 import crypto from 'crypto';
 import axios from 'axios';
 import PDFDocument from 'pdfkit';
 import { startShift, endShift } from './shifts';
+import { withGuardOperation, GuardOperationBusy } from './guard-operation';
 import { readGuardReport } from './guard-report';
 import { HistoryInputError, readHistoryPage } from './history';
 
@@ -15,7 +17,7 @@ const sessionKey = (req: Request) => {
   return raw && /^[a-f0-9]{64}$/.test(raw) ? digest(raw) : null;
 };
 
-export function installPortal(app: Router, db: admin.database.Database, qr: (id: string) => Promise<any>, qrStatus: (id: string, token: string) => Promise<{ renew: boolean }>) {
+export function installPortal(app: Router, db: Database, qr: (id: string) => Promise<any>, qrStatus: (id: string, token: string) => Promise<{ renew: boolean }>) {
   const router = Router();
   const cookieOptions = { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict' as const, path: '/' };
   const attempts = new Map<string, { count: number; until: number }>();
@@ -52,7 +54,7 @@ export function installPortal(app: Router, db: admin.database.Database, qr: (id:
 
   async function profile(uid: string): Promise<Profile | null> {
     try {
-      if ((await admin.auth().getUser(uid)).disabled) return null;
+      if ((await getAuth().getUser(uid)).disabled) return null;
     } catch (error: any) {
       if (error.code === 'auth/user-not-found') return null;
       throw error;
@@ -111,7 +113,7 @@ export function installPortal(app: Router, db: admin.database.Database, qr: (id:
     try {
       const base = emulator ? `http://${emulator}/identitytoolkit.googleapis.com` : 'https://identitytoolkit.googleapis.com';
       const result = await axios.post(`${base}/v1/accounts:signInWithPassword?key=${encodeURIComponent(apiKey || 'emulator')}`, { email, password, returnSecureToken: true }, { timeout: 10000 });
-      const identity = await admin.auth().verifyIdToken(result.data.idToken, true);
+      const identity = await getAuth().verifyIdToken(result.data.idToken, true);
       const current = await profile(identity.uid);
       if (!current) return res.status(403).json({ ok: false, error: 'Tu cuenta no tiene un perfil habilitado. Contacta al administrador.' });
       const value = crypto.randomBytes(32).toString('hex');
@@ -172,7 +174,7 @@ export function installPortal(app: Router, db: admin.database.Database, qr: (id:
       const authEmail = async (uid: string | null | undefined, fallback: any = null) => {
         if (fallback) return String(fallback);
         if (!uid) return null;
-        try { return (await admin.auth().getUser(uid)).email || null; } catch { return null; }
+        try { return (await getAuth().getUser(uid)).email || null; } catch { return null; }
       };
       const data: any[] = [];
       for (const [id, value] of Object.entries(students.val() || {})) {
@@ -199,7 +201,7 @@ export function installPortal(app: Router, db: admin.database.Database, qr: (id:
       const data = await Promise.all(Object.entries(guardsSnap.val() || {}).map(async ([id, value]: [string, any]) => {
         const uid = value?.authUid || null;
         let email = value?.email || null;
-        if (!email && uid) { try { email = (await admin.auth().getUser(uid)).email || null; } catch {} }
+        if (!email && uid) { try { email = (await getAuth().getUser(uid)).email || null; } catch {} }
         const activeShift = shifts.filter(shift => shift.guardId === id && shift.active !== false && !shift.endTimestamp)
           .sort((a, b) => Number(b.startTimestamp || 0) - Number(a.startTimestamp || 0))[0] || null;
         return { id, name: value?.name || id, email, active: value?.active !== false, lastLogin: value?.lastLogin || null, activeShift: activeShift ? { id: activeShift.id || null, startTimestamp: activeShift.startTimestamp || null } : null };
@@ -228,7 +230,7 @@ export function installPortal(app: Router, db: admin.database.Database, qr: (id:
     }
     if (req.body?.id) return res.status(400).json({ ok: false, error: 'El identificador se genera automaticamente.' });
     try {
-      const authUser = await admin.auth().createUser({ email, password, displayName: name, disabled: false });
+      const authUser = await getAuth().createUser({ email, password, displayName: name, disabled: false });
       const id = authUser.uid;
       const collection = role === 'admin' ? 'admins' : role === 'guard' ? 'guards' : 'students';
       await db.ref(`${collection}/${id}`).set({ name, email, role: role === 'member' ? 'estudiante' : role, active: true, authUid: authUser.uid, createdAt: Date.now() });
@@ -280,8 +282,7 @@ export function installPortal(app: Router, db: admin.database.Database, qr: (id:
         }
       }
       if (!mapping?.id || !['admin', 'guard', 'member'].includes(mapping.role)) return res.status(409).json({ ok: false, error: 'Perfil no vinculado.' });
-      const authUser = await admin.auth().updateUser(uid, { disabled: !active });
-      if (mapping) {
+      const updateAccount = async () => {
         const collection = mapping.role === 'admin' ? 'admins' : mapping.role === 'guard' ? 'guards' : 'students';
         const updates: Record<string, any> = {
           [`portalProfiles/${uid}`]: { id: mapping.id, role: mapping.role, active },
@@ -289,11 +290,18 @@ export function installPortal(app: Router, db: admin.database.Database, qr: (id:
         };
         // Revocation participates in the same per-person transaction as QR use.
         if (mapping.role === 'member') updates[`accessState/${mapping.id}/accessDisabled`] = !active;
-        await db.ref().update(updates);
-      }
+        // Fail closed if Firebase Auth is unavailable after revocation.
+        if (!active) await db.ref().update(updates);
+        const authUser = await getAuth().updateUser(uid, { disabled: !active });
+        if (active) await db.ref().update(updates);
+        return authUser;
+      };
+      const authUser = mapping.role === 'guard'
+        ? await withGuardOperation(db, mapping.id, 'account-status', updateAccount) : await updateAccount();
       await db.ref('adminAuditLog').push({ actorId: (req as any).portal.uid, action: active ? 'portal.user.activate' : 'portal.user.deactivate', entityType: 'user', entityId: uid, timestamp: Date.now(), ip: req.ip || null });
       return res.json({ ok: true, uid: authUser.uid, active });
     } catch (error: any) {
+      if (error instanceof GuardOperationBusy) return res.status(503).json({ ok: false, error: 'Guardia ocupado o bloqueo pendiente de revision. No se cambio el estado.' });
       if (error?.code === 'auth/user-not-found') return res.status(404).json({ ok: false, error: 'Usuario no encontrado.' });
       return res.status(503).json({ ok: false, error: 'No se pudo actualizar el usuario.' });
     }
@@ -342,7 +350,7 @@ export function installPortal(app: Router, db: admin.database.Database, qr: (id:
     const user: Profile = (req as any).portal;
     if (user.role !== 'guard') return res.status(403).json({ ok: false, error: 'Solo guardias pueden consultar su turno.' });
     try {
-      const snapshot = await db.ref('guardShifts').get();
+      const snapshot = await db.ref('guardShifts').orderByChild('guardId').equalTo(user.id).get();
       const active = Object.entries(snapshot.val() || {})
         .map(([id, value]: [string, any]) => ({ id, ...(value || {}) }))
         .filter(value => value.guardId === user.id && value.active !== false && !value.endTimestamp)
@@ -363,7 +371,7 @@ export function installPortal(app: Router, db: admin.database.Database, qr: (id:
     const user: Profile = (req as any).portal;
     if (user.role !== 'guard') return res.status(403).json({ ok: false, error: 'Solo guardias pueden finalizar turno.' });
     try {
-      const snapshot = await db.ref('guardShifts').get();
+      const snapshot = await db.ref('guardShifts').orderByChild('guardId').equalTo(user.id).get();
       const active = Object.entries(snapshot.val() || {})
         .map(([id, value]: [string, any]) => ({ id, ...(value || {}) }))
         .filter(value => value.guardId === user.id && value.active !== false && !value.endTimestamp)

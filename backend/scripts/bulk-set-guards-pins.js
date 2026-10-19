@@ -4,7 +4,8 @@
 //  node scripts/bulk-set-guards-pins.js --force  -> fuerza regeneración para todos
 // Salida: backend/output/guards-pins.csv
 
-const admin = require('firebase-admin');
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getDatabase } = require('firebase-admin/database');
 const bcrypt = require('bcrypt');
 const path = require('path');
 const fs = require('fs');
@@ -16,11 +17,11 @@ if (!fs.existsSync(KEY_PATH)) {
 }
 const serviceAccount = require(KEY_PATH);
 
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
+initializeApp({
+  credential: cert(serviceAccount),
   databaseURL: process.env.FIREBASE_DATABASE_URL || "https://control-de-seguridad-b4fa7-default-rtdb.firebaseio.com/"
 });
-const db = admin.database();
+const db = getDatabase();
 
 function genPinNumeric(len = 6) {
   // genera PIN numérico de `len` dígitos (ej: 6 -> 000123)

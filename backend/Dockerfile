@@ -1,4 +1,4 @@
-FROM node:20-alpine AS build
+FROM node:22-alpine AS build
 
 WORKDIR /app
 COPY backend/package*.json ./backend/
@@ -7,7 +7,7 @@ COPY backend/tsconfig.json ./backend/
 COPY backend/src ./backend/src
 RUN cd backend && npm run build
 
-FROM node:20-alpine
+FROM node:22-alpine
 ENV NODE_ENV=production
 WORKDIR /app
 COPY backend/package*.json ./backend/

@@ -1,15 +1,16 @@
-const admin = require('firebase-admin');
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getDatabase } = require('firebase-admin/database');
 const bcrypt = require('bcrypt');
 const path = require('path');
 
 const SERVICE = './serviceAccountKey.json';
 
-admin.initializeApp({
-  credential: admin.credential.cert(require(path.resolve(SERVICE))),
+initializeApp({
+  credential: cert(require(path.resolve(SERVICE))),
   databaseURL: "https://control-de-seguridad-b4fa7-default-rtdb.firebaseio.com/"
 });
 
-const db = admin.database();
+const db = getDatabase();
 
 const PIN_MAP = {
   "guard-01":"270326",

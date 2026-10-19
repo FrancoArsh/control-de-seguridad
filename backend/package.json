@@ -3,14 +3,14 @@
   "version": "1.0.0",
   "main": "dist/server.js",
   "engines": {
-    "node": "20.x"
+    "node": "22.x"
   },
   "scripts": {
-    "dev": "ts-node-dev src/server.ts",
+    "dev": "node --watch -r ts-node/register src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
     "test": "npm run build && node --test test/unit/*.test.mjs",
-    "test:integration": "npm run build && node --test test/integration.test.mjs test/history-emulator.test.mjs test/access-scaling-emulator.test.mjs",
+    "test:integration": "npm run build && node --test --test-concurrency=1 test/integration.test.mjs test/history-emulator.test.mjs test/access-scaling-emulator.test.mjs test/guard-operation-emulator.test.mjs test/operations.test.mjs test/recovery.test.mjs",
     "emulator:test": "firebase emulators:exec --only database,auth --project demo-control-seguridad \"npm run test:integration\"",
     "emulator:ops": "firebase emulators:exec --only database --project control-de-seguridad-test \"node --test test/operations.test.mjs\"",
     "emulator:recovery": "firebase emulators:exec --only database --project control-de-seguridad-test \"node --test test/recovery.test.mjs\"",
@@ -31,7 +31,7 @@
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
     "express": "^4.21.2",
-    "firebase-admin": "^12.7.0",
+    "firebase-admin": "^14.5.0",
     "jsonwebtoken": "^9.0.2",
     "pdfkit": "^0.20.2",
     "qrcode": "^1.5.4"
@@ -41,10 +41,9 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^4.17.25",
     "@types/jsonwebtoken": "^9.0.10",
-    "@types/node": "^20.19.25",
+    "@types/node": "^22.0.0",
     "@types/qrcode": "^1.5.6",
     "ts-node": "^10.9.2",
-    "ts-node-dev": "^2.0.0",
     "typescript": "^5.9.3"
   },
   "description": "",

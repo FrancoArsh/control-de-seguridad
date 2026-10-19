@@ -1,4 +1,4 @@
-import type { database } from 'firebase-admin';
+import type { Database } from 'firebase-admin/database';
 
 type Viewer = { uid: string; id: string; role: 'admin' | 'guard' | 'member' };
 type Cursor = { timestamp: number; key: string };
@@ -32,7 +32,7 @@ export function parseHistoryQuery(query: Record<string, any>) {
   return { limit, from, to, cursor, outcome, search: scalar('search').trim().toLowerCase(), sede: scalar('sede').trim().toLowerCase(), role: scalar('role').trim().toLowerCase() };
 }
 
-export async function readHistoryPage(db: database.Database, user: Viewer, query: Record<string, any>) {
+export async function readHistoryPage(db: Database, user: Viewer, query: Record<string, any>) {
   const filters = parseHistoryQuery(query);
   let cursor = filters.cursor, scanned = 0, exhausted = false;
   const data: any[] = [];

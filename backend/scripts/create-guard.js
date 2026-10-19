@@ -1,7 +1,8 @@
 // backend/scripts/create-guard.js
 // Uso: node backend/scripts/create-guard.js guard-01 "Nombre Guard" 1234
 
-const admin = require("firebase-admin");
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getDatabase } = require('firebase-admin/database');
 const bcrypt = require("bcrypt");
 const path = require("path");
 
@@ -10,8 +11,8 @@ const keyPath = path.resolve(__dirname, "../serviceAccountKey.json");
 
 try {
   const serviceAccount = require(keyPath);
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
+  initializeApp({
+    credential: cert(serviceAccount),
     databaseURL: process.env.FIREBASE_DATABASE_URL || "https://control-de-seguridad-b4fa7-default-rtdb.firebaseio.com/"
   });
 } catch (e) {
@@ -20,7 +21,7 @@ try {
   process.exit(1);
 }
 
-const db = admin.database();
+const db = getDatabase();
 
 (async () => {
   const [, , id, name, pin] = process.argv;

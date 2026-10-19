@@ -1,7 +1,9 @@
 // create-admin-from-email.js (acepta ruta opcional al serviceAccount)
 const fs = require('fs');
 const path = require('path');
-const adminSdk = require('firebase-admin');
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getAuth } = require('firebase-admin/auth');
+const { getDatabase } = require('firebase-admin/database');
 
 console.log('=== create-admin-from-email (flexible) ===');
 console.log('cwd:', process.cwd());
@@ -25,8 +27,8 @@ if (!fs.existsSync(saPath)) {
 const sa = JSON.parse(fs.readFileSync(saPath, 'utf8'));
 
 try {
-  adminSdk.initializeApp({
-    credential: adminSdk.credential.cert(sa),
+  initializeApp({
+    credential: cert(sa),
     databaseURL: "https://control-de-seguridad-b4fa7-default-rtdb.firebaseio.com"
   });
 } catch (e) {
@@ -34,8 +36,8 @@ try {
   process.exit(2);
 }
 
-const auth = adminSdk.auth();
-const db = adminSdk.database();
+const auth = getAuth();
+const db = getDatabase();
 
 (async function() {
   try {
