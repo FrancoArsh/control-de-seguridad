@@ -9,6 +9,7 @@ import { withGuardOperation, GuardOperationBusy } from './guard-operation';
 import { readGuardReport } from './guard-report';
 import { readGuardSummary } from './guard-summary';
 import { HistoryInputError, readHistoryPage } from './history';
+import { commitManualAccess } from './manual-access';
 
 type Profile = { uid: string; id: string; role: 'admin' | 'guard' | 'member'; name: string };
 const cookieName = 'control_session';
@@ -382,6 +383,42 @@ export function installPortal(app: Router, db: Database, qr: (id: string) => Pro
       if (!shift) return res.status(409).json({ ok: false, error: 'El turno ya fue cerrado o modificado. Actualiza su estado.' });
       res.json({ ok: true, active: false, shift });
     } catch { res.status(503).json({ ok: false, error: 'No se pudo finalizar el turno.' }); }
+  });
+  router.post('/guard/exception', async (req, res) => {
+    const user: Profile = (req as any).portal;
+    if (user.role !== 'guard') return res.status(403).json({ ok: false, error: 'Solo guardias pueden registrar excepciones.' });
+    const userId = String(req.body?.userId || '').trim();
+    const type = String(req.body?.type || '').trim().toLowerCase();
+    const reason = String(req.body?.reason || '').trim();
+    const sessionId = String(req.body?.sessionId || 'default').trim() || 'default';
+    if (!userId || userId.length > 160 || /[.#$\[\]/\u0000-\u001f\u007f]/.test(userId) || !['entry', 'exit', 'auto'].includes(type)) {
+      return res.status(400).json({ ok: false, error: 'Identificador o movimiento invalido.' });
+    }
+    if (reason.length < 3 || reason.length > 500 || !sessionId || /[.#$\[\]/\u0000-\u001f\u007f]/.test(sessionId)) {
+      return res.status(400).json({ ok: false, error: 'El motivo es obligatorio y debe tener entre 3 y 500 caracteres.' });
+    }
+    try {
+      const snapshot = await db.ref('guardShifts').orderByChild('guardId').equalTo(user.id).get();
+      const shift = Object.entries(snapshot.val() || {})
+        .map(([id, value]: [string, any]) => ({ id, ...(value || {}) }))
+        .filter(value => value.guardId === user.id && value.active !== false && !value.endTimestamp)
+        .sort((a, b) => Number(b.startTimestamp || 0) - Number(a.startTimestamp || 0))[0];
+      if (!shift) return res.status(403).json({ ok: false, error: 'Debes iniciar tu turno antes de registrar una excepcion.', reason: 'GUARD_NOT_ON_SHIFT' });
+      const eventId = db.ref('accessHistory').push().key!;
+      const result = await commitManualAccess(db, {
+        userId, type: type as 'entry' | 'exit' | 'auto', sessionId, eventId, reason,
+        audit: { validatedById: user.uid, validatedByName: user.name, validatedByRole: 'guard', guardId: user.id, shiftId: shift.id, validatorIp: req.ip || null, validatorUserAgent: req.headers['user-agent'] || null }
+      });
+      if (!result.ok) {
+        const status = result.reason === 'GUARD_NOT_ON_SHIFT' || result.reason === 'guard disabled' || result.reason === 'user disabled' ? 403 : result.reason === 'user not found' ? 404 : 409;
+        return res.status(status).json({ ok: false, error: result.reason, reason: result.reason });
+      }
+      await db.ref('adminAuditLog').push({ actorId: user.uid, actorName: user.name, action: 'guard.manual_exception', entityType: 'access', entityId: userId, metadata: { reason, accessType: result.accessType, shiftId: shift.id }, timestamp: Date.now(), ip: req.ip || null });
+      return res.status(201).json({ ok: true, studentUid: userId, name: result.name, accessType: result.accessType, inside: result.newInside, reason });
+    } catch (error) {
+      console.error('portal guard exception error:', error);
+      return res.status(503).json({ ok: false, error: 'No se pudo registrar la excepcion.' });
+    }
   });
   router.get('/qr', async (req, res) => {
     const user: Profile = (req as any).portal;

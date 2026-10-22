@@ -275,6 +275,24 @@ test("valida concurrencia y deja una sola persona dentro", async () => {
   assert.equal(state.lastAccessType, "entry");
 });
 
+test('serializa entrada y salida simultaneas con nonces distintos', async () => {
+  const db = getDatabase(seedApp);
+  await db.ref('accessState/stu-001').set({ inside: false, lastTimestamp: 0, lastAccessType: null });
+  await db.ref('students/stu-001/lastAccessTimestamp').set(0);
+  const headers = await loginAs('guard.integration@example.test');
+  const startedAt = Date.now();
+  const [entry, exit] = await Promise.all([
+    validate(headers, signedQr('stu-001'), 'entry'),
+    validate(headers, signedQr('stu-001'), 'exit')
+  ]);
+  assert.equal([entry, exit].filter(result => result.body.ok === true).length, 1);
+  assert.equal([entry, exit].filter(result => result.body.ok !== true).length, 1);
+  assert.equal((await db.ref('accessState/stu-001/inside').get()).val(), true);
+  const events = Object.values((await db.ref('accessHistory').get()).val() || {})
+    .filter(row => row.studentUid === 'stu-001' && row.authorized === true && row.timestamp >= startedAt);
+  assert.equal(events.length, 1);
+});
+
 test("impide consultar presencia a un guardia autenticado", async () => {
   const login = await request("/guard/login", {
     method: "POST",
@@ -286,6 +304,64 @@ test("impide consultar presencia a un guardia autenticado", async () => {
     headers: { authorization: `Bearer ${login.body.token}` }
   });
   assert.ok([401, 403].includes(presence.response.status));
+});
+
+test('aísla las operaciones del portal por rol y revoca una sesión desactivada', async () => {
+  const db = getDatabase(seedApp);
+  const auth = getAuth(seedApp);
+  const member = await auth.createUser({ email: 'member.permissions@example.test', password: 'IntegrationPass123!' });
+  await db.ref(`students/${member.uid}`).set({ name: 'Miembro de permisos', active: true, tipoUsuario: 'estudiante' });
+
+  const guard = await loginAs('guard.integration@example.test');
+  const memberHeaders = await loginAs('member.permissions@example.test');
+  const guardDenied = ['/portal/users', '/portal/guards', '/portal/guard-report', '/portal/student-qr/stu-001', '/presence'];
+  for (const route of guardDenied) assert.equal((await request(route, { headers: guard })).response.status, 403, `guard denied ${route}`);
+  for (const route of ['/portal/summary', '/portal/history', '/portal/guard/shift']) {
+    assert.equal((await request(route, { headers: guard })).response.status, 200, `guard allowed ${route}`);
+  }
+
+  const memberDenied = ['/portal/users', '/portal/guards', '/portal/guard-report', '/portal/student-qr/stu-001', '/presence', '/portal/guard/shift'];
+  for (const route of memberDenied) assert.equal((await request(route, { headers: memberHeaders })).response.status, 403, `member denied ${route}`);
+  for (const route of ['/portal/summary', '/portal/history', '/portal/qr']) {
+    assert.equal((await request(route, { headers: memberHeaders })).response.status, 200, `member allowed ${route}`);
+  }
+
+  const guardUid = (await db.ref('guards/guard-001/authUid').get()).val();
+  await auth.updateUser(guardUid, { disabled: true });
+  assert.equal((await request('/portal/me', { headers: guard })).response.status, 401);
+  await auth.updateUser(guardUid, { disabled: false });
+});
+
+test('registra excepciones manuales solo en turno y deja auditoria', async () => {
+  const db = getDatabase(seedApp);
+  const guard = await loginAs('guard.integration@example.test');
+  const id = `manual-person-${Date.now()}`;
+  await db.ref(`students/${id}`).set({ name: 'Persona manual', active: true, tipoUsuario: 'visitante' });
+  await db.ref('guardShifts/manual-exception-shift').set({ guardId: 'guard-001', active: true, startTimestamp: Date.now() });
+
+  const invalid = await request('/portal/guard/exception', {
+    method: 'POST', headers: guard, body: JSON.stringify({ userId: id, type: 'entry', reason: '' })
+  });
+  assert.equal(invalid.response.status, 400);
+
+  const entry = await request('/portal/guard/exception', {
+    method: 'POST', headers: guard, body: JSON.stringify({ userId: id, type: 'entry', reason: 'Visitante sin QR vigente' })
+  });
+  assert.equal(entry.response.status, 201, JSON.stringify(entry.body));
+  assert.equal(entry.body.accessType, 'entry');
+  assert.equal((await db.ref(`accessState/${id}/inside`).get()).val(), true);
+  const history = Object.values((await db.ref('accessHistory').get()).val() || {}).find(row => row.studentUid === id);
+  assert.equal(history.validationMode, 'manual');
+  assert.equal(history.reason, 'Visitante sin QR vigente');
+  assert.equal(history.token, undefined);
+  assert.equal(history.guardId, 'guard-001');
+  const audit = Object.values((await db.ref('adminAuditLog').get()).val() || {}).find(row => row.entityId === id);
+  assert.equal(audit.action, 'guard.manual_exception');
+
+  const duplicate = await request('/portal/guard/exception', {
+    method: 'POST', headers: guard, body: JSON.stringify({ userId: id, type: 'entry', reason: 'Segundo intento' })
+  });
+  assert.equal(duplicate.response.status, 409);
 });
 
 test("valida concurrencia de salida y conserva un unico estado final", async () => {

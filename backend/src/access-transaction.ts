@@ -138,11 +138,12 @@ export async function flushPendingAccess(db: Database, userId: string, captured?
   const pending = captured || (await ref.child('_pendingAccess').get()).val();
   if (!pending) return;
   const event = pending.event;
-  await db.ref().update({
+  const updates: Record<string, any> = {
     [`accessHistory/${pending.eventId}`]: event,
-    [`attendance/${event.sessionId}/${userId}/${pending.eventId}`]: pending.attendance,
-    [`dynamicQrNonces/${pending.nonceKey}`]: pending.nonce
-  });
+    [`attendance/${event.sessionId}/${userId}/${pending.eventId}`]: pending.attendance
+  };
+  if (pending.nonceKey && pending.nonce) updates[`dynamicQrNonces/${pending.nonceKey}`] = pending.nonce;
+  await db.ref().update(updates);
   await ref.child('_pendingAccess').transaction(current => {
     if (current === null) return null;
     if (current?.eventId === pending.eventId) return null;

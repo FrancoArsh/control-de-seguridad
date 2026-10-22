@@ -92,6 +92,7 @@ async function enter(profile) {
   $('login').hidden = true; $('workspace').hidden = false; $('boot').hidden = true;
   $('workspace').dataset.role = user.role;
   $('guard-shift-panel').hidden = user.role !== 'guard';
+  $('guard-exception-panel').hidden = user.role !== 'guard';
   $('report-actions').hidden = false;
   $('download-pdf').hidden = user.role !== 'admin';
   $('username').textContent = user.name;
@@ -261,6 +262,7 @@ async function loadGuardReport(reset = false, target = guardPage) {
   $('guard-prev').disabled = $('guard-next').disabled = true;
   $('guard-count').textContent = 'Cargando turnos…';
   $('guard-stats').replaceChildren();
+  $('exception-form').reset(); $('exception-status').textContent = '';
   try {
     const result = await api(`/portal/guard-report?${params}`);
     if (request !== guardRequest || version !== viewVersion || !user) return;
@@ -408,6 +410,17 @@ $('end-shift').onclick = async () => {
   $('end-shift').disabled = true;
   try { await api('/portal/guard/shift/end', {}); await loadGuardShift(); }
   catch (error) { $('shift-status').textContent = error.message; $('end-shift').disabled = false; }
+};
+$('exception-form').onsubmit = async event => {
+  event.preventDefault();
+  const submit = $('exception-form').querySelector('[type=submit]');
+  submit.disabled = true; $('exception-status').textContent = 'Registrando excepción…';
+  try {
+    const result = await api('/portal/guard/exception', { userId: $('exception-user-id').value.trim(), type: $('exception-type').value, reason: $('exception-reason').value.trim() });
+    $('exception-status').textContent = `${result.accessType === 'entry' ? 'Entrada' : 'Salida'} manual registrada para ${result.name || result.studentUid}.`;
+    $('exception-form').reset();
+  } catch (error) { $('exception-status').textContent = error.message; }
+  finally { submit.disabled = false; }
 };
 $('stop-camera').onclick = stopCamera;
 $('start-camera').onclick = async () => {
