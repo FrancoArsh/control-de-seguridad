@@ -1,0 +1,17 @@
+{
+  "commit": "a408ea6306fe0b66c2bb9f73f992d4fb971107cf",
+  "environment": "local development",
+  "target": "GET /health",
+  "url": "http://127.0.0.1:3000/health",
+  "requests": 1000,
+  "concurrency": 50,
+  "completed": 1000,
+  "failed": 0,
+  "durationMs": 483,
+  "latencyMs": {
+    "p50": 19.58,
+    "p95": 44.06,
+    "max": 73.45
+  },
+  "interpretation": "Baseline of the health endpoint only; it is not a measurement of QR validation latency or Firebase query latency."
+}
