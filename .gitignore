@@ -17,6 +17,7 @@ backend/recovery/
 # Local credential exports must never be published.
 backend/guards-created.csv
 backend/output/
+backend/docs/evidence-login-current.png
 backend/QRS/
 firebase-debug.log
 database-debug.log
