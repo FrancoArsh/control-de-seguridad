@@ -18,6 +18,7 @@ backend/recovery/
 backend/guards-created.csv
 backend/output/
 backend/docs/evidence-login-current.png
+docs/evidence/
 backend/QRS/
 firebase-debug.log
 database-debug.log
