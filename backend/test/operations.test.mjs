@@ -14,7 +14,8 @@ const databaseUrl = `http://${emulatorHost}?ns=${projectId}`;
 const outputDir = path.join(root, ".tmp", "backup-test");
 let seedApp;
 
-function runScript(script, args) {
+function runScript(script, args, extraEnv = {}) {
+  const backupKey = extraEnv.BACKUP_ENCRYPTION_KEY || process.env.TEST_BACKUP_KEY || "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [path.join(root, "scripts", script), ...args], {
       cwd: root,
@@ -23,7 +24,8 @@ function runScript(script, args) {
         FIREBASE_DATABASE_EMULATOR_HOST: emulatorHost,
         FIREBASE_DATABASE_URL: databaseUrl,
         GCLOUD_PROJECT: projectId,
-        BACKUP_ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        BACKUP_ENCRYPTION_KEY: backupKey,
+        ...extraEnv
       },
       stdio: ["ignore", "pipe", "pipe"]
     });
@@ -106,6 +108,47 @@ test("genera respaldo cifrado y permite previsualizar su restauracion", async ()
   assert.equal(envelope.collections, undefined);
   const restorePreview = await runScript("restore-rtdb.mjs", [`--file=${path.join(encryptedDir, "encrypted.json")}`]);
   assert.equal(restorePreview.mode, "preview");
+});
+
+test("restaura un respaldo cifrado aplicado y rechaza clave o contenido alterado", async () => {
+  const db = getDatabase(seedApp);
+  const encryptedDir = path.join(outputDir, "encrypted-applied");
+  const source = {
+    students: { "encrypted-student": { name: "Restaurado cifrado", active: true } },
+    admins: { "encrypted-admin": { name: "Administrador restaurado", role: "admin" } },
+    portalProfiles: { "encrypted-profile": { id: "encrypted-student", role: "member", active: true } },
+    accessHistory: {
+      "encrypted-event": { authorized: true, reason: "ok", timestamp: Date.now() },
+      recent: { authorized: true, timestamp: Date.now() }
+    },
+    portalSessions: { "session-must-not-return": { expiresAt: Date.now() + 60000 } },
+    dynamicQrNonces: { "nonce-must-not-return": { expiresAt: Date.now() + 60000 } }
+  };
+  await db.ref().set(source);
+  const file = path.join(encryptedDir, "complete-encrypted.json");
+  const created = await runScript("backup-rtdb.mjs", [
+    `--output=${encryptedDir}`, "--file=complete-encrypted.json", "--encrypt=true"
+  ]);
+  assert.equal(created.encrypted, true);
+  await db.ref().set({ marker: "cleared-before-restore" });
+  const startedAt = Date.now();
+  const applied = await runScript("restore-rtdb.mjs", [`--file=${file}`, "--apply=true"]);
+  const durationMs = Date.now() - startedAt;
+  assert.equal(applied.mode, "apply");
+  assert.equal((await db.ref("students/encrypted-student/name").get()).val(), "Restaurado cifrado");
+  assert.equal((await db.ref("admins/encrypted-admin/role").get()).val(), "admin");
+  assert.equal((await db.ref("portalProfiles/encrypted-profile/id").get()).val(), "encrypted-student");
+  assert.equal((await db.ref("accessHistory/encrypted-event/authorized").get()).val(), true);
+  assert.equal((await db.ref("portalSessions").get()).exists(), false);
+  assert.equal((await db.ref("dynamicQrNonces").get()).exists(), false);
+
+  const wrongKey = path.join(encryptedDir, "wrong-key.json");
+  await assert.rejects(runScript("restore-rtdb.mjs", [`--file=${file}`, "--apply=true"], { BACKUP_ENCRYPTION_KEY: "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd" }));
+  const parsed = JSON.parse(await fs.readFile(file, "utf8"));
+  parsed.ciphertext = `${parsed.ciphertext.slice(0, -2)}xx`;
+  await fs.writeFile(wrongKey, JSON.stringify(parsed, null, 2));
+  await assert.rejects(runScript("restore-rtdb.mjs", [`--file=${wrongKey}`, "--apply=true"]));
+  assert.ok(durationMs >= 0);
 });
 
 test("retención opera en preview y luego aplica el borrado", async () => {
