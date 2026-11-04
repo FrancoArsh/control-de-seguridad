@@ -1,6 +1,6 @@
 import type { Database } from 'firebase-admin/database';
 import { withGuardOperation } from './guard-operation';
-import { flushPendingAccess } from './access-transaction';
+import { flushPendingAccess, AccessPublicationPending } from './access-transaction';
 
 export type ManualAccessCommand = {
   userId: string;
@@ -22,17 +22,21 @@ export async function commitManualAccess(db: Database, command: ManualAccessComm
     let decision: ManualAccessResult = { ok: false, reason: 'access state conflict' };
     ref.on('value', listener, () => {});
     try {
+      for (let attempt = 0; attempt < 3; attempt++) {
+      await flushPendingAccess(db, command.userId);
       const [student, guard, shift] = await Promise.all([
         db.ref(`students/${command.userId}`).get(),
         db.ref(`guards/${command.audit.guardId}`).get(),
         db.ref(`guardShifts/${command.audit.shiftId}`).get()
       ]);
+      await ref.get();
       const result = await ref.transaction(current => {
         const state = current || {};
         const person = student.val();
         const guardValue = guard.val();
         const shiftValue = shift.val();
         const reject = (reason: string) => { decision = { ok: false, reason }; return; };
+        if (state._pendingAccess) return reject('access pending');
         if (!person) return reject('user not found');
         if (person.active === false || state.accessDisabled === true) return reject('user disabled');
         if (!guardValue || guardValue.active === false) return reject('guard disabled');
@@ -70,14 +74,23 @@ export async function commitManualAccess(db: Database, command: ManualAccessComm
           sessionId: command.sessionId,
           _pendingAccess: {
             kind: 'manual', status: 'pending', eventId: command.eventId, event,
+            adminAudit: { actorId: command.audit.validatedById, actorName: command.audit.validatedByName || null,
+              action: 'guard.manual_exception', entityType: 'access', entityId: command.userId,
+              metadata: { reason: command.reason, accessType, shiftId: command.audit.shiftId },
+              timestamp: event.timestamp, ip: command.audit.validatorIp || null },
             attendance: { type: accessType, timestamp: event.timestamp, qrVersion: null, validationMode: 'manual', previousInside, newInside }
           }
         };
       }, undefined, false);
-      if (!result.committed) return decision.ok ? { ok: false, reason: 'access state conflict' } : decision;
+      if (!result.committed) {
+        if (!decision.ok && decision.reason === 'access pending') continue;
+        return decision.ok ? { ok: false, reason: 'access state conflict' } : decision;
+      }
       try { await flushPendingAccess(db, command.userId, result.snapshot.val()._pendingAccess); }
-      catch { return { ok: false, reason: 'ACCESS_PUBLICATION_PENDING' }; }
+      catch { throw new AccessPublicationPending(command.eventId); }
       return decision;
+      }
+      return { ok: false, reason: 'access pending' };
     } finally { ref.off('value', listener); }
   });
 }

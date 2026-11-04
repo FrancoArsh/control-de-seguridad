@@ -10,6 +10,7 @@ import { readGuardReport } from './guard-report';
 import { readGuardSummary } from './guard-summary';
 import { HistoryInputError, readHistoryPage } from './history';
 import { commitManualAccess } from './manual-access';
+import { AccessPublicationPending } from './access-transaction';
 
 type Profile = { uid: string; id: string; role: 'admin' | 'guard' | 'member'; name: string };
 const cookieName = 'control_session';
@@ -413,9 +414,10 @@ export function installPortal(app: Router, db: Database, qr: (id: string) => Pro
         const status = result.reason === 'GUARD_NOT_ON_SHIFT' || result.reason === 'guard disabled' || result.reason === 'user disabled' ? 403 : result.reason === 'user not found' ? 404 : 409;
         return res.status(status).json({ ok: false, error: result.reason, reason: result.reason });
       }
-      await db.ref('adminAuditLog').push({ actorId: user.uid, actorName: user.name, action: 'guard.manual_exception', entityType: 'access', entityId: userId, metadata: { reason, accessType: result.accessType, shiftId: shift.id }, timestamp: Date.now(), ip: req.ip || null });
       return res.status(201).json({ ok: true, studentUid: userId, name: result.name, accessType: result.accessType, inside: result.newInside, reason });
     } catch (error) {
+      if (error instanceof AccessPublicationPending) return res.status(503).json({ ok: false, reason: 'ACCESS_PUBLICATION_PENDING', eventId: error.eventId,
+        error: 'Movimiento registrado; auditoria pendiente. Consulta el historial y el estado antes de repetir.' });
       console.error('portal guard exception error:', error);
       return res.status(503).json({ ok: false, error: 'No se pudo registrar la excepcion.' });
     }

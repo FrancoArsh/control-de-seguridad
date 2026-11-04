@@ -143,6 +143,7 @@ export async function flushPendingAccess(db: Database, userId: string, captured?
     [`attendance/${event.sessionId}/${userId}/${pending.eventId}`]: pending.attendance
   };
   if (pending.nonceKey && pending.nonce) updates[`dynamicQrNonces/${pending.nonceKey}`] = pending.nonce;
+  if (pending.adminAudit) updates[`adminAuditLog/${pending.eventId}`] = pending.adminAudit;
   await db.ref().update(updates);
   await ref.child('_pendingAccess').transaction(current => {
     if (current === null) return null;
