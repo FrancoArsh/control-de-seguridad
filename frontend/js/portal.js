@@ -172,21 +172,38 @@ async function navigate() {
     } else if (key === 'history') {
       await loadHistory(true);
     } else if (key === 'qr') {
+      $('qr-expiry').textContent = '';
       if (document.hidden) return;
-      const result = await api('/portal/qr');
+      if (!navigator.onLine) {
+        $('status').textContent = 'La credencial se actualizará al volver la conexión.';
+        return;
+      }
+      let result;
+      try {
+        result = await api('/portal/qr');
+      } catch (error) {
+        if (version === viewVersion && !document.hidden && navigator.onLine && (!error.status || error.status >= 500)) {
+          qrTimer = setTimeout(() => {
+            if (version === viewVersion && !document.hidden && navigator.onLine) navigate();
+          }, 5000);
+        }
+        throw error;
+      }
       if (version !== viewVersion || document.hidden) return;
       $('credential-name').textContent = user.name;
       $('my-qr').src = result.qrDataUrl; $('my-qr').hidden = false;
       let checking = false, ticks = 0;
       const tick = async () => {
-        if (checking || version !== viewVersion || !user) return;
+        if (version !== viewVersion || !user) return;
         const left = Math.max(0, Math.ceil((result.expiresAt - Date.now()) / 1000));
         $('qr-expiry').textContent = left ? `Válido por ${left} segundos` : 'QR vencido. Se renovará automáticamente.';
+        if (!left) $('my-qr').hidden = true;
+        if (checking) return;
         if (!left || ++ticks % 3 === 0) {
           checking = true;
           try {
             const state = left ? await api('/portal/qr/status', { token: result.token }) : { renew: true };
-            if (version === viewVersion && !document.hidden && !state.renew) $('my-qr').hidden = false;
+            if (version === viewVersion && !document.hidden && !state.renew && Date.now() < result.expiresAt) $('my-qr').hidden = false;
             if (version === viewVersion && !document.hidden && state.renew) {
               $('my-qr').hidden = true;
               await navigate();
@@ -336,6 +353,37 @@ async function loadGuardShift() {
     $('shift-title').textContent = result.active ? 'Turno activo' : 'Turno cerrado';
   } catch (error) { $('shift-status').textContent = error.message; }
 }
+// Only groups camera frames after a confirmed admission. The server validates every submitted QR.
+function presentationOwner(value) {
+  if (value.length > 4096) return null;
+  const parts = value.split('.');
+  if (parts.length !== 2) return null;
+  try {
+    const encoded = parts[0].replace(/-/g, '+').replace(/_/g, '/');
+    const bytes = Uint8Array.from(atob(encoded), char => char.charCodeAt(0));
+    const payload = JSON.parse(new TextDecoder().decode(bytes));
+    return typeof payload.sub === 'string' ? payload.sub : null;
+  } catch { return null; }
+}
+
+function scanRejectionMessage(reason) {
+  switch (reason) {
+    case 'qr expired': return 'El QR venció. Pide que te muestren la credencial actualizada.';
+    case 'qr already used': return 'Este QR ya se utilizó. Revisa el último ingreso antes de volver a escanear.';
+    case 'GUARD_NOT_ON_SHIFT': return 'Inicia tu turno para validar ingresos.';
+    case 'COOLDOWN_ACTIVE': return 'Hay un ingreso reciente. Revisa el último registro.';
+    case 'user disabled': return 'La credencial está desactivada. Deriva la consulta a administración.';
+    case 'guard disabled': return 'Tu cuenta de guardia está desactivada. Contacta a administración.';
+    case 'user not found': return 'La persona no tiene una credencial registrada.';
+    case 'invalid qr format':
+    case 'invalid qr signature':
+    case 'invalid qr payload':
+    case 'invalid qr lifetime':
+    case 'static qr disabled': return 'Presenta el QR vigente del portal.';
+    default: return 'Consulta el motivo en el historial de portería.';
+  }
+}
+
 async function validate(value) {
   if (busy || !user) return;
   if (!navigator.onLine) { $('scan-result').removeAttribute('data-ok'); $('scan-result').textContent = 'Sin conexión. No se ha enviado la validación.'; return; }
@@ -350,6 +398,7 @@ async function validate(value) {
     if (result?.ok !== true || result.accessType !== 'entry') throw new Error('Respuesta de validación incompleta.');
     $('scan-result').dataset.ok = 'true'; $('scan-result').textContent = `Entrada autorizada: ${result.name || result.studentUid}`;
     $('qr-value').value = '';
+    return result.studentUid;
   } catch (error) {
     if (version !== viewVersion) return;
     const notice = $('scan-result');
@@ -359,7 +408,7 @@ async function validate(value) {
       notice.textContent = 'Guardia ocupado. El ingreso no se registró.';
     } else if ([400, 403, 404, 409].includes(error.status)) {
       notice.dataset.ok = 'false';
-      notice.textContent = 'Ingreso rechazado. ' + error.message;
+      notice.textContent = 'Ingreso rechazado. ' + scanRejectionMessage(error.reason || error.message);
     } else {
       notice.textContent = 'Sin confirmación del servidor. Revisa el historial antes de repetir el escaneo.';
     }
@@ -482,18 +531,21 @@ $('start-camera').onclick = async () => {
   try {
     if (!window.Html5Qrcode) throw new Error('El lector QR no pudo cargarse. Actualiza la página.');
     scanner ||= new Html5Qrcode('reader');
-    let lastCode = '', lastSeen = -Infinity;
-    function onDecoded(value) {
+    let lastCode = '', lastSeen = -Infinity, approvedId;
+    async function onDecoded(value) {
       if (!scanning || generation !== cameraGeneration || document.hidden) return;
       const now = performance.now();
-      if (value === lastCode && now - lastSeen < 1000) {
+      const continuous = now - lastSeen < 1000;
+      if (continuous && (value === lastCode || (approvedId && presentationOwner(value) === approvedId))) {
         lastSeen = now;
+        lastCode = value;
         return;
       }
       if (busy || !navigator.onLine) return;
       lastCode = value;
       lastSeen = now;
-      void validate(value);
+      approvedId = undefined;
+      approvedId = await validate(value);
     }
     await scanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: (width, height) => { const side = Math.max(50, Math.min(240, Math.floor(Math.min(width, height) * 0.7))); return { width: side, height: side }; } }, onDecoded);
     scanning = true; $('stop-camera').disabled = false;
@@ -511,8 +563,12 @@ function updateConnection() {
   $('connection-status').hidden = navigator.onLine;
   $('connection-status').textContent = navigator.onLine ? '' : 'Sin conexión. No se pueden confirmar accesos ni cambios.';
 }
-window.addEventListener('offline', updateConnection);
-window.addEventListener('online', updateConnection);
+function connectionChanged() {
+  updateConnection();
+  if (user?.role === 'member' && !document.hidden && !$('qr-view').hidden) navigate();
+}
+window.addEventListener('offline', connectionChanged);
+window.addEventListener('online', connectionChanged);
 updateConnection();
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) { if (user && !$('qr-view').hidden) viewVersion++; stopCamera(); clearInterval(qrTimer); $('my-qr').hidden = true; clearAdminQr(); $('admin-qr-dialog').close(); }
