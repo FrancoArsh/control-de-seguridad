@@ -99,6 +99,7 @@ async function showLogin() {
   $('user-rows').replaceChildren(); $('guard-rows').replaceChildren();
   $('guard-stats').replaceChildren();
   $('scan-result').textContent = ''; $('qr-value').value = ''; $('user-password').value = '';
+  $('exception-form').reset(); $('exception-status').textContent = '';
   history = []; presence = []; guards = [];
 }
 function navLink(key) { return `<a href="#${key}"><span class="nav-symbol" aria-hidden="true">${links[key][1]}</span>${links[key][0]}</a>`; }
@@ -107,6 +108,9 @@ async function enter(profile) {
   $('login').hidden = true; $('workspace').hidden = false; $('boot').hidden = true;
   $('workspace').dataset.role = user.role;
   $('guard-shift-panel').hidden = user.role !== 'guard';
+  lockShiftControls();
+  $('shift-title').textContent = 'Turno';
+  $('shift-status').textContent = 'Consultando turno…';
   $('guard-exception-panel').hidden = user.role !== 'guard';
   $('report-actions').hidden = false;
   $('download-pdf').hidden = user.role !== 'admin';
@@ -342,35 +346,53 @@ function guardStats(counts) {
     + stat('Guardias activos', counts?.active ?? 'No disponible')
     + stat('Guardias inactivos', counts?.inactive ?? 'No disponible');
 }
-async function loadGuardShift() {
-  const panel = $('guard-shift-panel');
-  panel.hidden = false;
+let shiftRequest = 0, shiftOperator;
+function lockShiftControls() {
+  $('start-shift').disabled = true;
+  $('end-shift').disabled = true;
+}
+async function loadGuardShift(message = '') {
+  const operator = user, version = viewVersion, request = ++shiftRequest;
+  lockShiftControls();
+  if (operator?.role !== 'guard' || shiftOperator === operator) return;
+  const current = () => user === operator && version === viewVersion && request === shiftRequest;
   try {
     const result = await api('/portal/guard/shift');
-    $('shift-status').textContent = result.active ? `Turno activo desde ${date(result.shift.startTimestamp)}. Puedes validar accesos.` : 'Sin turno activo. Inicia turno para validar accesos.';
+    if (!current()) return;
+    const state = result.active ? `Turno activo desde ${date(result.shift.startTimestamp)}. Puedes validar accesos.` : 'Sin turno activo.';
+    $('shift-status').textContent = [message, state].filter(Boolean).join(' ');
     $('start-shift').disabled = result.active;
     $('end-shift').disabled = !result.active;
     $('shift-title').textContent = result.active ? 'Turno activo' : 'Turno cerrado';
-  } catch (error) { $('shift-status').textContent = error.message; }
+  } catch {
+    if (!current()) return;
+    $('shift-title').textContent = 'Estado de turno sin confirmar';
+    $('shift-status').textContent = 'Usa Actualizar datos para consultar tu turno antes de continuar.';
+  }
 }
-// Only groups camera frames after a confirmed admission. The server validates every submitted QR.
-function presentationOwner(value) {
-  if (value.length > 4096) return null;
-  const parts = value.split('.');
-  if (parts.length !== 2) return null;
+async function changeShift(action) {
+  const operator = user;
+  if (operator?.role !== 'guard' || shiftOperator === operator || $(action + '-shift').disabled) return;
+  shiftOperator = operator;
+  ++shiftRequest;
+  lockShiftControls();
+  $('shift-status').textContent = 'Actualizando turno…';
+  let message = '';
   try {
-    const encoded = parts[0].replace(/-/g, '+').replace(/_/g, '/');
-    const bytes = Uint8Array.from(atob(encoded), char => char.charCodeAt(0));
-    const payload = JSON.parse(new TextDecoder().decode(bytes));
-    return typeof payload.sub === 'string' ? payload.sub : null;
-  } catch { return null; }
+    await api('/portal/guard/shift/' + action, {});
+  } catch (error) {
+    message = error.message;
+  } finally {
+    if (shiftOperator === operator) shiftOperator = undefined;
+  }
+  if (user === operator && !$('home-view').hidden) await loadGuardShift(message);
 }
-
 function scanRejectionMessage(reason) {
   switch (reason) {
     case 'qr expired': return 'El QR venció. Pide que te muestren la credencial actualizada.';
     case 'qr already used': return 'Este QR ya se utilizó. Revisa el último ingreso antes de volver a escanear.';
     case 'GUARD_NOT_ON_SHIFT': return 'Inicia tu turno para validar ingresos.';
+    case 'cooldown active':
     case 'COOLDOWN_ACTIVE': return 'Hay un ingreso reciente. Revisa el último registro.';
     case 'user disabled': return 'La credencial está desactivada. Deriva la consulta a administración.';
     case 'guard disabled': return 'Tu cuenta de guardia está desactivada. Contacta a administración.';
@@ -398,7 +420,6 @@ async function validate(value) {
     if (result?.ok !== true || result.accessType !== 'entry') throw new Error('Respuesta de validación incompleta.');
     $('scan-result').dataset.ok = 'true'; $('scan-result').textContent = `Entrada autorizada: ${result.name || result.studentUid}`;
     $('qr-value').value = '';
-    return result.studentUid;
   } catch (error) {
     if (version !== viewVersion) return;
     const notice = $('scan-result');
@@ -498,26 +519,33 @@ $('user-form').onsubmit = async event => {
   catch (error) { $('user-form-status').textContent = error.message; }
   finally { creatingUser = false; submit.disabled = false; }
 };
-$('start-shift').onclick = async () => {
-  $('start-shift').disabled = true;
-  try { await api('/portal/guard/shift/start', {}); await loadGuardShift(); }
-  catch (error) { $('shift-status').textContent = error.message; $('start-shift').disabled = false; }
-};
-$('end-shift').onclick = async () => {
-  $('end-shift').disabled = true;
-  try { await api('/portal/guard/shift/end', {}); await loadGuardShift(); }
-  catch (error) { $('shift-status').textContent = error.message; $('end-shift').disabled = false; }
-};
+$('start-shift').onclick = () => changeShift('start');
+$('end-shift').onclick = () => changeShift('end');
 $('exception-form').onsubmit = async event => {
   event.preventDefault();
-  const submit = $('exception-form').querySelector('[type=submit]');
-  submit.disabled = true; $('exception-status').textContent = 'Registrando excepción…';
+  const form = $('exception-form'), notice = $('exception-status');
+  const submit = form.querySelector('[type=submit]');
+  if (submit.disabled || user?.role !== 'guard') return;
+  const operator = user;
+  submit.disabled = true;
+  notice.textContent = 'Registrando excepción…';
   try {
     const result = await api('/portal/guard/exception', { userId: $('exception-user-id').value.trim(), type: 'entry', reason: $('exception-reason').value.trim() });
-    $('exception-status').textContent = `${result.accessType === 'entry' ? 'Entrada' : 'Salida'} manual registrada para ${result.name || result.studentUid}.`;
-    $('exception-form').reset();
-  } catch (error) { $('exception-status').textContent = error.message; }
-  finally { submit.disabled = false; }
+    if (user !== operator) return;
+    if (result?.ok !== true || result.accessType !== 'entry') throw new Error();
+    notice.textContent = `Entrada manual registrada para ${result.name || result.studentUid}.`;
+    form.reset();
+  } catch (error) {
+    if (user !== operator) return;
+    if (error.reason === 'ACCESS_PUBLICATION_PENDING') {
+      notice.textContent = 'Ingreso registrado. La auditoría está pendiente. Evita repetir la excepción.';
+      form.reset();
+    } else if ([400, 403, 404, 409].includes(error.status)) {
+      notice.textContent = error.reason ? scanRejectionMessage(error.reason) : error.message;
+    } else {
+      notice.textContent = 'Sin confirmación del ingreso manual. Consulta el historial antes de repetirlo.';
+    }
+  } finally { submit.disabled = false; }
 };
 $('stop-camera').onclick = stopCamera;
 $('start-camera').onclick = async () => {
@@ -531,21 +559,18 @@ $('start-camera').onclick = async () => {
   try {
     if (!window.Html5Qrcode) throw new Error('El lector QR no pudo cargarse. Actualiza la página.');
     scanner ||= new Html5Qrcode('reader');
-    let lastCode = '', lastSeen = -Infinity, approvedId;
-    async function onDecoded(value) {
+    let lastCode = '', lastSeen = -Infinity;
+    function onDecoded(value) {
       if (!scanning || generation !== cameraGeneration || document.hidden) return;
       const now = performance.now();
-      const continuous = now - lastSeen < 1000;
-      if (continuous && (value === lastCode || (approvedId && presentationOwner(value) === approvedId))) {
+      if (value === lastCode && now - lastSeen < 1000) {
         lastSeen = now;
-        lastCode = value;
         return;
       }
-      if (busy || !navigator.onLine) return;
+      if (busy) return;
       lastCode = value;
       lastSeen = now;
-      approvedId = undefined;
-      approvedId = await validate(value);
+      void validate(value);
     }
     await scanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: (width, height) => { const side = Math.max(50, Math.min(240, Math.floor(Math.min(width, height) * 0.7))); return { width: side, height: side }; } }, onDecoded);
     scanning = true; $('stop-camera').disabled = false;
