@@ -35,11 +35,10 @@ La entrada `/` presenta el portal con correo y contraseña. La sesión se guarda
 
 - Inicio: resumen según rol.
 - Escanear QR: disponible solo para guardias con turno activo.
-- Personas dentro: disponible solo para administradores.
-- Historial: administradores ven todos los eventos; guardias solo ven sus propias validaciones; los miembros solo ven sus eventos.
+- Historial: administradores ven todos los eventos; guardias solo ven sus propias validaciones.
 - Mi código QR: disponible para miembros.
-- Usuarios: disponible para administradores; permite alta, edición, consulta, activación, desactivación y QR de estudiantes.
-- Reportes: CSV para usuarios autorizados y PDF para administradores.
+- Usuarios: disponible para administradores; permite alta, consulta, activación, desactivación y QR de estudiantes.
+- Reportes: exportación de la página visible del historial en CSV y, para administradores, también en PDF.
 
 La validación `POST /validate` requiere una sesión administrativa o una sesión de guardia con turno activo. El login antiguo de guardia permanece disponible para compatibilidad, pero el portal es la entrada recomendada.
 

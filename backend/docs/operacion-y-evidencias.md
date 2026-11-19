@@ -2,14 +2,14 @@
 
 ## Alcance de esta etapa
 
-- La API valida QR estáticos y dinámicos, registra auditoría y mantiene un estado de presencia por persona.
+- La API valida credenciales dinámicas y registra ingresos y rechazos en auditoría.
 - El cambio de estado se confirma con una transacción de Firebase Realtime Database.
-- El endpoint `GET /presence` entrega solo personas con `inside=true` y exige autenticación de guardia o administrador.
+- La ruta administrativa retirada `GET /presence` devuelve HTTP 410. El historial de ingresos no permite calcular el aforo.
 - Los nonces dinámicos se eliminan periódicamente cuando su `expiresAt` ya venció.
 
 ## Despliegue
 
-1. Usar Node.js 20 LTS, `npm ci`, `npm run build` y `npm start`.
+1. Usar Node.js 22.x, `npm ci`, `npm run build` y `npm start`.
 2. Configurar `NODE_ENV=production`, `FIREBASE_DATABASE_URL`, `FIREBASE_SERVICE_ACCOUNT` o `GOOGLE_APPLICATION_CREDENTIALS`, `JWT_SECRET` y un `QR_SECRET` independiente.
 3. Definir `ALLOWED_ORIGINS` con los orígenes reales y nunca dejar secretos en el repositorio.
 4. Publicar detrás de HTTPS y un proxy con límites de conexión y registro de errores.
@@ -55,7 +55,8 @@ La retención y la restauración comienzan siempre en modo `preview`; `--apply=t
 - Seguridad: reglas Firebase, prueba negativa de autorización, expiración, replay y revisión OWASP ASVS.
 - Concurrencia: salida de `npm run emulator:test` con una sola autorización exitosa ante solicitudes simultáneas.
 - Operación: captura de `/health`, métricas, SLA, procedimiento de contingencia y prueba de recuperación.
-- Rendimiento: salida de `npm run load:test -- --url=http://127.0.0.1:3000 --path=/health --requests=200 --concurrency=20`.
+- Carga del endpoint de salud: salida de `npm run load:test -- --url=http://127.0.0.1:3000 --path=/health --requests=200 --concurrency=20`.
+- Decisión QR: registrar el P95 HTTP de aprobaciones y rechazos en la prueba de `/validate` con Emulator. Medir en cámara física el intervalo desde el encuadre hasta el resultado visible.
 - Operación de datos: salida de `npm run emulator:ops`, que comprueba respaldo redactado, preview y borrado controlado.
 - Recuperación: salida de `npm run emulator:recovery`, que comprueba preview sin cambios y rotación efectiva de token y PIN.
 

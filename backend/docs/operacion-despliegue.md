@@ -18,7 +18,7 @@ El respaldo incluye datos RTDB operativos, `admins`, `portalProfiles` y un inven
 3. Ejecutar `--apply=true` en un entorno aislado.
 4. Ejecutar `credential-recovery.mjs --apply=true` para regenerar tokens y PIN.
 5. Restablecer contrasenas de Firebase Auth por un canal administrativo.
-6. Validar login, roles, QR, auditoria y presencia.
+6. Validar login, roles, QR, auditoría de ingresos y rechazo de solicitudes de salida.
 
 La restauracion no recupera contrasenas Auth, sesiones ni nonces QR. El tiempo de recuperacion debe medirse desde la descarga hasta la validacion del primer acceso y registrarse como evidencia.
 
