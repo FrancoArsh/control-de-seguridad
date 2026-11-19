@@ -67,7 +67,10 @@ async function api(path, body, method) {
   } finally { clearTimeout(timeout); }
   if (!response.ok) {
     if (response.status === 401 && path !== '/portal/login' && requestUser === user) await showLogin();
-    throw new Error(data.error || 'No fue posible completar la solicitud.');
+    const error = new Error(data?.error || 'No fue posible completar la solicitud.');
+    error.status = response.status;
+    error.reason = data?.reason;
+    throw error;
   }
   return data;
 }
@@ -140,6 +143,26 @@ async function navigate() {
         ? stat('Mi estado', result.inside ? 'Dentro' : 'Fuera') + stat('Último movimiento', date(result.lastTimestamp))
         : user.role === 'guard' ? stat('Guardia', user.name) + stat('Identificador', user.id)
         : guardStats(result.guardCounts);
+      if (user.role === 'admin') {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = 'Consultar indicadores de las últimas 24 horas';
+        $('stats').append(button);
+        button.onclick = async () => {
+          button.disabled = true;
+          try {
+            const { kpis } = await api('/admin/metrics');
+            if (version !== viewVersion) return;
+            const percent = ratio => ratio == null ? 'Sin muestra' : ratio.toLocaleString('es-CL', { style: 'percent', maximumFractionDigits: 2 });
+            button.insertAdjacentHTML('beforebegin', stat('Ingresos con validador identificado', percent(kpis.validatorCoverage24h))
+              + stat('Ingresos identificados / aprobados', kpis.entriesWithValidator24h + ' / ' + kpis.approvedEntries24h)
+              + stat('Rechazos sobre decisiones', percent(kpis.rejectionRate24h)));
+            button.remove();
+          } catch (error) {
+            if (version === viewVersion) { $('status').textContent = error.message; button.disabled = false; }
+          }
+        };
+      }
       if (user.role === 'guard') await loadGuardShift();
     } else if (key === 'presence') {
       $('presence-rows').replaceChildren();
@@ -324,9 +347,23 @@ async function validate(value) {
     if (/^https?:\/\//.test(token)) { const url = new URL(token); token = url.searchParams.get('token') || url.searchParams.get('qr') || token; }
     const result = await api('/validate', { qr: token, type: 'entry' });
     if (version !== viewVersion) return;
+    if (result?.ok !== true || result.accessType !== 'entry') throw new Error('Respuesta de validación incompleta.');
     $('scan-result').dataset.ok = 'true'; $('scan-result').textContent = `Entrada autorizada: ${result.name || result.studentUid}`;
     $('qr-value').value = '';
-  } catch (error) { if (version === viewVersion) { $('scan-result').dataset.ok = 'false'; $('scan-result').textContent = error.message; } }
+  } catch (error) {
+    if (version !== viewVersion) return;
+    const notice = $('scan-result');
+    if (error.reason === 'ACCESS_PUBLICATION_PENDING') {
+      notice.textContent = 'Ingreso registrado. La auditoría está pendiente. Evita repetir el escaneo.';
+    } else if (error.reason === 'GUARD_OPERATION_BUSY') {
+      notice.textContent = 'Guardia ocupado. El ingreso no se registró.';
+    } else if ([400, 403, 404, 409].includes(error.status)) {
+      notice.dataset.ok = 'false';
+      notice.textContent = 'Ingreso rechazado. ' + error.message;
+    } else {
+      notice.textContent = 'Sin confirmación del servidor. Revisa el historial antes de repetir el escaneo.';
+    }
+  }
   finally { busy = false; $('validate-button').disabled = false; }
 }
 $('login-form').addEventListener('submit', async event => {

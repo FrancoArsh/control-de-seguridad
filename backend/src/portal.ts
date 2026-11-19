@@ -241,14 +241,29 @@ export function installPortal(app: Router, db: Database, qr: (id: string) => Pro
       const authUser = await getAuth().createUser({ email, password, displayName: name, disabled: false });
       const id = authUser.uid;
       const collection = role === 'admin' ? 'admins' : role === 'guard' ? 'guards' : 'students';
-      await db.ref(`${collection}/${id}`).set({ name, email, role: role === 'member' ? 'estudiante' : role, active: true, authUid: authUser.uid, createdAt: Date.now() });
-      await db.ref(`portalProfiles/${authUser.uid}`).set({ id, role, active: true });
-      await db.ref(`adminAuditLog`).push({ actorId: (req as any).portal.uid, action: 'portal.user.create', entityType: role, entityId: id, timestamp: Date.now(), ip: req.ip || null });
+      const timestamp = Date.now();
+      const auditKey = db.ref('adminAuditLog').push().key!;
+      const records = {
+        [`${collection}/${id}`]: { name, email, role: role === 'member' ? 'estudiante' : role, active: true, authUid: id, createdAt: timestamp },
+        [`portalProfiles/${id}`]: { id, role, active: true },
+        [`adminAuditLog/${auditKey}`]: { actorId: (req as any).portal.uid, action: 'portal.user.create', entityType: role, entityId: id, timestamp, ip: req.ip || null }
+      };
+      try {
+        await db.ref().update(records);
+      } catch (writeError) {
+        // Resolve an ambiguous acknowledgement before compensating in Auth.
+        const mapping = await db.ref(`portalProfiles/${id}`).get();
+        if (!mapping.exists()) {
+          await getAuth().deleteUser(id);
+          throw writeError;
+        }
+        if (mapping.child('id').val() !== id || mapping.child('role').val() !== role) throw writeError;
+      }
       return res.status(201).json({ ok: true, user: { id, uid: authUser.uid, email, name, role, active: true } });
     } catch (error: any) {
       if (error?.code === 'auth/email-already-exists') return res.status(409).json({ ok: false, error: 'El correo ya esta registrado.' });
       console.error('portal user create error:', error);
-      return res.status(503).json({ ok: false, error: 'No se pudo crear el usuario.' });
+      return res.status(503).json({ ok: false, error: 'No se pudo confirmar el alta. Revisa la cuenta en Firebase Authentication y su perfil antes de repetir.' });
     }
   });
 

@@ -748,11 +748,11 @@ async function loadMetricsDashboard() {
   document.getElementById('kpiAuthorized24h').textContent = k.authorizedAccesses24h ?? '0';
   document.getElementById('kpiRejected24h').textContent = k.rejectedAccesses24h ?? '0';
   document.getElementById('kpiActiveShifts').textContent = k.activeGuardShifts ?? '0';
-  document.getElementById('kpiRejectionRate').textContent = ((Number(k.rejectionRate24h || 0) * 100).toFixed(1)) + '%';
+  document.getElementById('kpiRejectionRate').textContent = k.rejectionRate24h == null ? 'Sin muestra' : (k.rejectionRate24h * 100).toFixed(1) + '%';
   document.getElementById('kpiManualOverrides').textContent = k.manualOverrides24h ?? '0';
   document.getElementById('kpiUsers').textContent = k.registeredUsers ?? '0';
   document.getElementById('kpiGuards').textContent = k.registeredGuards ?? '0';
-  document.getElementById('kpiPeopleInside').textContent = k.peopleCurrentlyInside ?? '0';
+  document.getElementById('kpiPeopleInside').textContent = k.peopleCurrentlyInside ?? 'Sin medición';
 }
 
 async function loadAuditLog() {

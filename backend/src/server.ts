@@ -649,7 +649,7 @@ app.get("/admin/metrics", requireFirebaseAdmin, async (req, res) => {
     const weekStart = now - 7 * 24 * 60 * 60 * 1000;
 
     const [historySnap, shiftsSnap, usersSnap, guardsSnap] = await Promise.all([
-      db.ref("accessHistory").orderByChild("timestamp").startAt(weekStart).get(),
+      db.ref("accessHistory").orderByChild("timestamp").startAt(dayStart).endAt(now).get(),
       db.ref("guardShifts").get(),
       db.ref("students").get(),
       db.ref("guards").get()
@@ -660,6 +660,9 @@ app.get("/admin/metrics", requireFirebaseAdmin, async (req, res) => {
     const last24 = rows.filter((r: any) => Number(r.timestamp || 0) >= dayStart);
     const authorized24 = last24.filter((r: any) => r.authorized === true);
     const rejected24 = last24.filter((r: any) => r.authorized === false);
+    const entries = authorized24.filter((row: any) => row.accessType === 'entry');
+    const identified = entries.filter((row: any) => typeof row.validatedById === 'string' && row.validatedById.trim());
+    const decided = authorized24.length + rejected24.length;
     const manualOverrides24 = last24.filter((r: any) => r.validationMode === "manual" || r.reason === "manual_override");
     const shiftsVal = shiftsSnap.val() || {};
     const shifts = Object.keys(shiftsVal).map(k => ({ id: k, ...(shiftsVal[k] || {}) }));
@@ -682,7 +685,10 @@ app.get("/admin/metrics", requireFirebaseAdmin, async (req, res) => {
         accessEvents24h: last24.length,
         authorizedAccesses24h: authorized24.length,
         rejectedAccesses24h: rejected24.length,
-        rejectionRate24h: last24.length ? Number((rejected24.length / last24.length).toFixed(4)) : 0,
+        rejectionRate24h: decided ? rejected24.length / decided : null,
+        approvedEntries24h: entries.length,
+        entriesWithValidator24h: identified.length,
+        validatorCoverage24h: entries.length ? identified.length / entries.length : null,
         manualOverrides24h: manualOverrides24.length,
         peopleCurrentlyInside: null,
         activeGuardShifts: activeShifts.length,

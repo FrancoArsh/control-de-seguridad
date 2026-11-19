@@ -423,6 +423,16 @@ test("autentica el portal y aplica la sesion y el rol de administrador", async (
   });
   assert.equal(created.response.status, 201);
   assert.equal(created.body.user.role, "member");
+  const newStudent = await loginAs('member.integration@example.test');
+  const credential = await request('/portal/qr', { headers: newStudent });
+  assert.equal(credential.response.status, 200);
+  const payload = JSON.parse(Buffer.from(credential.body.token.split('.')[0], 'base64url'));
+  assert.equal(payload.sub, created.body.user.id);
+  const auditRows = (await getDatabase(seedApp).ref('adminAuditLog').get()).val() || {};
+  const creation = Object.values(auditRows).filter(row => row.entityId === payload.sub && row.action === 'portal.user.create');
+  assert.equal(creation.length, 1);
+  assert.equal(creation[0].actorId, me.body.user.uid);
+
 
   const disabled = await portalRequest(`/portal/users/${created.body.user.uid}`, {
     method: "PATCH",
