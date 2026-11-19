@@ -16,7 +16,12 @@ type Profile = { uid: string; id: string; role: 'admin' | 'guard' | 'member'; na
 const cookieName = 'control_session';
 const digest = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
 const sessionKey = (req: Request) => {
-  const raw = (req.headers.cookie || '').split(';').map(v => v.trim()).find(v => v.startsWith(`${cookieName}=`))?.slice(cookieName.length + 1);
+  // The browser shares cookies between tabs. A tab session header takes precedence;
+  // when a tab has no token yet, ignore the shared cookie so a second login cannot
+  // inherit the session from another tab.
+  const headerToken = req.get('X-Portal-Session');
+  const tabHeader = req.get('X-Portal-Tab');
+  const raw = headerToken || (tabHeader ? null : (req.headers.cookie || '').split(';').map(v => v.trim()).find(v => v.startsWith(`${cookieName}=`))?.slice(cookieName.length + 1));
   return raw && /^[a-f0-9]{64}$/.test(raw) ? digest(raw) : null;
 };
 
@@ -126,7 +131,7 @@ export function installPortal(app: Router, db: Database, qr: (id: string) => Pro
       if (oldKey) await db.ref(`portalSessions/${oldKey}`).remove();
       res.cookie(cookieName, value, { ...cookieOptions, maxAge });
       attempts.delete(attemptKey);
-      return res.json({ ok: true, user: current });
+      return res.json({ ok: true, user: current, sessionToken: value });
     } catch (error: any) {
       const code = error.response?.data?.error?.message || '';
       if (['INVALID_LOGIN_CREDENTIALS', 'EMAIL_NOT_FOUND', 'INVALID_PASSWORD', 'USER_DISABLED'].includes(code)) {
@@ -157,7 +162,7 @@ export function installPortal(app: Router, db: Database, qr: (id: string) => Pro
     try {
       const key = sessionKey(req);
       if (key) await db.ref(`portalSessions/${key}`).remove();
-      res.clearCookie(cookieName, cookieOptions);
+      if (!req.get('X-Portal-Session')) res.clearCookie(cookieName, cookieOptions);
       res.json({ ok: true });
     } catch { res.status(503).json({ ok: false, error: 'No se pudo cerrar la sesion. Reintenta.' }); }
   });
@@ -311,6 +316,7 @@ export function installPortal(app: Router, db: Database, qr: (id: string) => Pro
   });
 
   router.get('/history', async (req, res) => {
+    if ((req as any).portal?.role === 'member') return res.status(403).json({ ok: false, error: 'El historial no está disponible para estudiantes.' });
     try { res.json({ ok: true, ...await readHistoryPage(db, (req as any).portal, req.query) }); }
     catch (error) {
       if (error instanceof HistoryInputError) return res.status(400).json({ ok: false, error: error.message });
@@ -318,6 +324,7 @@ export function installPortal(app: Router, db: Database, qr: (id: string) => Pro
     }
   });
   router.get('/history.pdf', async (req, res) => {
+    if ((req as any).portal?.role === 'member') return res.status(403).json({ ok: false, error: 'El historial no está disponible para estudiantes.' });
     try {
       const { data: rows } = await readHistoryPage(db, (req as any).portal, req.query);
       res.setHeader('Content-Type', 'application/pdf');
@@ -343,10 +350,9 @@ export function installPortal(app: Router, db: Database, qr: (id: string) => Pro
       if (user.role === 'guard') return res.json({ ok: true });
       if (user.role === 'member') {
         const state = (await db.ref(`accessState/${user.id}`).get()).val();
-        return res.json({ ok: true, inside: state?.inside === true, lastTimestamp: state?.lastTimestamp || null });
+        return res.json({ ok: true, lastTimestamp: state?.lastTimestamp || null });
       }
-      const snapshot = (await db.ref('accessState').get()).val() || {};
-      res.json({ ok: true, insideCount: Object.values(snapshot).filter((v: any) => v.inside === true).length, guardCounts: await readGuardSummary(db) });
+      res.json({ ok: true, guardCounts: await readGuardSummary(db) });
     } catch { res.status(503).json({ ok: false, error: 'No se pudo cargar el resumen.' }); }
   });
   router.get('/guard/shift', async (req, res) => {
@@ -389,10 +395,10 @@ export function installPortal(app: Router, db: Database, qr: (id: string) => Pro
     const user: Profile = (req as any).portal;
     if (user.role !== 'guard') return res.status(403).json({ ok: false, error: 'Solo guardias pueden registrar excepciones.' });
     const userId = String(req.body?.userId || '').trim();
-    const type = String(req.body?.type || '').trim().toLowerCase();
+    const type = String(req.body?.type ?? 'entry').trim().toLowerCase();
     const reason = String(req.body?.reason || '').trim();
     const sessionId = String(req.body?.sessionId || 'default').trim() || 'default';
-    if (!userId || userId.length > 160 || /[.#$\[\]/\u0000-\u001f\u007f]/.test(userId) || !['entry', 'exit', 'auto'].includes(type)) {
+    if (!userId || userId.length > 160 || /[.#$\[\]/\u0000-\u001f\u007f]/.test(userId) || !['entry', 'auto'].includes(type)) {
       return res.status(400).json({ ok: false, error: 'Identificador o movimiento invalido.' });
     }
     if (reason.length < 3 || reason.length > 500 || !sessionId || /[.#$\[\]/\u0000-\u001f\u007f]/.test(sessionId)) {

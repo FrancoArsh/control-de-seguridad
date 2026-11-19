@@ -41,10 +41,9 @@ export function applyDynamicAccess(current: Root, command: AccessCommand, now: n
     return reject('cooldown active');
   }
   const previousInside = state.inside === true;
-  const accessType = command.type === 'auto' ? (previousInside ? 'exit' : 'entry') : command.type;
-  if (accessType === 'entry' && previousInside) return reject('user already inside');
-  if (accessType === 'exit' && !previousInside) return reject('user already outside');
-  const newInside = accessType === 'entry';
+  if (command.type === 'exit') return reject('entry only');
+  const accessType = 'entry';
+  const newInside = true;
   const event = {
     ...command.audit, id: command.userId, studentUid: command.userId, name: student.name || null,
     sede: student.sede || student.campus || null, tipoUsuario: student.tipoUsuario || student.role || null,

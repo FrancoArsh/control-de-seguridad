@@ -34,10 +34,10 @@ test('isolated access transactions, durable recovery and bounded guard reports',
     const independent = await Promise.all(['b', 'c'].map(id => commitDynamicAccess(guarded, command(id, `entry-${id}`))));
     assert.ok(independent.every(r => r.ok));
     failPublication = true;
-    await assert.rejects(commitDynamicAccess(guarded, command('b', 'exit-b', 'exit')), AccessPublicationPending);
+    await assert.rejects(commitDynamicAccess(guarded, command('b', 'repeat-b', 'entry')), AccessPublicationPending);
     const pending = (await db.ref('accessState/b/_pendingAccess').get()).val();
-    assert.equal((await db.ref('accessState/b/inside').get()).val(), false);
-    assert.ok((await db.ref('accessState/b/_usedQrNonces/exit-b').get()).exists());
+    assert.equal((await db.ref('accessState/b/inside').get()).val(), true);
+    assert.ok((await db.ref('accessState/b/_usedQrNonces/repeat-b').get()).exists());
     failPublication = false;
     assert.equal(await recoverPendingAccess(db), 1);
     assert.equal((await db.ref('accessState/b/_pendingAccess').get()).exists(), false);
@@ -64,7 +64,7 @@ test('isolated access transactions, durable recovery and bounded guard reports',
     await db.ref('students/c/active').set(true);
     for (let round = 0; round < 10; round++) {
       const repeated = await Promise.all(Array.from({ length: 12 }, () => commitDynamicAccess(guarded,
-        command('c', `stress-${round}`, round % 2 === 0 ? 'exit' : 'entry'))));
+        command('c', `stress-${round}`, 'entry'))));
       assert.equal(repeated.filter(r => r.ok).length, 1, `Round ${round}`);
       assert.equal(repeated.filter(r => r.reason === 'qr already used').length, 11, JSON.stringify(repeated));
     }

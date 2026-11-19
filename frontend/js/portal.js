@@ -39,9 +39,20 @@ document.querySelectorAll('.table-scroll').forEach(element => {
 });
 const links = { inicio: ['Inicio', '⌂'], scan: ['Escanear QR', '▣'], presence: ['Personas dentro', '◉'], history: ['Historial', '≡'], qr: ['Mi código QR', '▦'], users: ['Usuarios', '♙'], guards: ['Guardias', '♜'] };
 const views = { inicio: 'home', scan: 'scan', presence: 'presence', history: 'history', qr: 'qr', users: 'users', guards: 'guards' };
-const allowed = () => user?.role === 'member' ? ['inicio', 'qr', 'history'] : user?.role === 'guard' ? ['inicio', 'scan', 'history'] : ['inicio', 'presence', 'history', 'users', 'guards'];
+const allowed = () => user?.role === 'member' ? ['qr'] : user?.role === 'guard' ? ['inicio', 'scan', 'history'] : ['inicio', 'history', 'users', 'guards'];
 const date = value => value ? new Date(value).toLocaleString('es-CL') : 'Sin registros';
 const escape = value => String(value ?? '').replace(/[&<>"']/g, v => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[v]);
+const portalSessionKey = 'control_portal_session';
+const portalTabKey = 'control_portal_tab';
+const portalTab = sessionStorage.getItem(portalTabKey) || (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`);
+sessionStorage.setItem(portalTabKey, portalTab);
+
+function portalHeaders() {
+  const headers = { 'X-Portal-Request': '1', 'X-Portal-Tab': portalTab };
+  const token = sessionStorage.getItem(portalSessionKey);
+  if (token) headers['X-Portal-Session'] = token;
+  return headers;
+}
 
 async function api(path, body, method) {
   const requestUser = user;
@@ -49,7 +60,7 @@ async function api(path, body, method) {
   const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 20000);
   let response, data;
   try {
-    response = await fetch(path, { method: verb, credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Portal-Request': '1' }, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store', signal: controller.signal });
+    response = await fetch(path, { method: verb, credentials: 'same-origin', headers: { ...portalHeaders(), 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body), cache: 'no-store', signal: controller.signal });
     data = await response.json();
   } catch {
     throw new Error(verb === 'GET' ? 'No se pudo consultar el servidor. Revisa la conexión y vuelve a intentar.' : 'Sin confirmación del servidor. Consulta el estado antes de repetir la operación.');
@@ -77,6 +88,7 @@ async function showLogin() {
   clearAdminQr(); $('admin-qr-dialog').close(); $('edit-dialog').close(); editingUser = null;
   historyRequest++; clearTimeout(historyTimer); filteredHistory = []; historyQuery = '';
   user = null; viewVersion++; clearInterval(qrTimer); await stopCamera();
+  sessionStorage.removeItem(portalSessionKey);
   $('workspace').hidden = true; $('login').hidden = false; $('boot').hidden = true;
   $('password').value = ''; $('my-qr').removeAttribute('src');
   $('presence-rows').replaceChildren(); $('history-rows').replaceChildren();
@@ -108,8 +120,10 @@ async function navigate() {
   clearAdminQr(); $('admin-qr-dialog').close();
   const version = ++viewVersion;
   let key = location.hash.slice(1) || 'inicio';
-  if (!allowed().includes(key)) key = 'inicio';
-  await stopCamera(); clearInterval(qrTimer);
+  if (!allowed().includes(key)) key = allowed()[0] || 'inicio';
+  await stopCamera();
+  if (version !== viewVersion) return;
+  clearInterval(qrTimer);
   $('my-qr').hidden = true;
   for (const value of Object.values(views)) $(`${value}-view`).hidden = true;
   $(`${views[key]}-view`).hidden = false;
@@ -125,7 +139,7 @@ async function navigate() {
       $('stats').innerHTML = user.role === 'member'
         ? stat('Mi estado', result.inside ? 'Dentro' : 'Fuera') + stat('Último movimiento', date(result.lastTimestamp))
         : user.role === 'guard' ? stat('Guardia', user.name) + stat('Identificador', user.id)
-        : stat('Personas dentro', result.insideCount) + guardStats(result.guardCounts);
+        : guardStats(result.guardCounts);
       if (user.role === 'guard') await loadGuardShift();
     } else if (key === 'presence') {
       $('presence-rows').replaceChildren();
@@ -135,20 +149,22 @@ async function navigate() {
     } else if (key === 'history') {
       await loadHistory(true);
     } else if (key === 'qr') {
+      if (document.hidden) return;
       const result = await api('/portal/qr');
-      if (version !== viewVersion) return;
+      if (version !== viewVersion || document.hidden) return;
       $('credential-name').textContent = user.name;
       $('my-qr').src = result.qrDataUrl; $('my-qr').hidden = false;
       let checking = false, ticks = 0;
       const tick = async () => {
         if (checking || version !== viewVersion || !user) return;
         const left = Math.max(0, Math.ceil((result.expiresAt - Date.now()) / 1000));
-        $('qr-expiry').textContent = left ? `Válido por ${left} segundos` : 'QR vencido. Genera uno nuevo.';
+        $('qr-expiry').textContent = left ? `Válido por ${left} segundos` : 'QR vencido. Se renovará automáticamente.';
         if (!left || ++ticks % 3 === 0) {
           checking = true;
           try {
             const state = left ? await api('/portal/qr/status', { token: result.token }) : { renew: true };
-            if (version === viewVersion && state.renew) {
+            if (version === viewVersion && !document.hidden && !state.renew) $('my-qr').hidden = false;
+            if (version === viewVersion && !document.hidden && state.renew) {
               $('my-qr').hidden = true;
               await navigate();
             }
@@ -301,21 +317,21 @@ async function validate(value) {
   if (busy || !user) return;
   if (!navigator.onLine) { $('scan-result').removeAttribute('data-ok'); $('scan-result').textContent = 'Sin conexión. No se ha enviado la validación.'; return; }
   busy = true; $('validate-button').disabled = true;
-  await stopCamera();
+  const version = viewVersion;
   $('scan-result').textContent = 'Validando…'; $('scan-result').removeAttribute('data-ok');
   try {
     let token = value.trim();
     if (/^https?:\/\//.test(token)) { const url = new URL(token); token = url.searchParams.get('token') || url.searchParams.get('qr') || token; }
-    const result = await api('/validate', { qr: token, type: $('direction').value });
-    const movement = result.accessType === 'exit' ? 'Salida' : 'Entrada';
-    $('scan-result').dataset.ok = 'true'; $('scan-result').textContent = `${movement} autorizada: ${result.name || result.studentUid}`;
+    const result = await api('/validate', { qr: token, type: 'entry' });
+    if (version !== viewVersion) return;
+    $('scan-result').dataset.ok = 'true'; $('scan-result').textContent = `Entrada autorizada: ${result.name || result.studentUid}`;
     $('qr-value').value = '';
-  } catch (error) { $('scan-result').dataset.ok = 'false'; $('scan-result').textContent = error.message; }
+  } catch (error) { if (version === viewVersion) { $('scan-result').dataset.ok = 'false'; $('scan-result').textContent = error.message; } }
   finally { busy = false; $('validate-button').disabled = false; }
 }
 $('login-form').addEventListener('submit', async event => {
   event.preventDefault(); $('login-button').disabled = true; $('login-error').textContent = '';
-  try { const data = await api('/portal/login', { email: $('email').value.trim(), password: $('password').value }); $('password').value = ''; await enter(data.user); }
+  try { const data = await api('/portal/login', { email: $('email').value.trim(), password: $('password').value }); sessionStorage.setItem(portalSessionKey, data.sessionToken); $('password').value = ''; await enter(data.user); }
   catch (error) { $('login-error').textContent = error.message; }
   finally { $('login-button').disabled = false; }
 });
@@ -331,7 +347,7 @@ $('logout').onclick = async () => {
   $('logout').disabled = true;
   try {
     await api('/portal/logout', {});
-    for (const key of ['idToken','admin_user','admin_uid','guard_auth_token','guard_auth_guardid']) { localStorage.removeItem(key); sessionStorage.removeItem(key); }
+    for (const key of ['idToken','admin_user','admin_uid','guard_auth_token','guard_auth_guardid', portalSessionKey]) { localStorage.removeItem(key); sessionStorage.removeItem(key); }
     await showLogin(); location.hash = '';
   } catch (error) { $('status').textContent = error.message; }
   finally { $('logout').disabled = false; }
@@ -348,7 +364,7 @@ document.addEventListener('keydown', event => { if (event.key === 'Escape' && $(
 document.addEventListener('click', event => {
   if (!$('sidebar').contains(event.target) && !$('menu').contains(event.target)) closeMenu();
 });
-$('refresh').onclick = navigate; $('renew-qr').onclick = navigate;
+$('refresh').onclick = navigate;
 $('edit-cancel').onclick = () => $('edit-dialog').close();
 $('edit-form').onsubmit = async event => {
   event.preventDefault();
@@ -370,7 +386,7 @@ $('download-csv').onclick = async () => {
 };
 $('download-pdf').onclick = async () => {
   try {
-    const response = await fetch(`/portal/history.pdf?${historyQuery}`, { credentials: 'same-origin', headers: { 'X-Portal-Request': '1' }, cache: 'no-store' });
+    const response = await fetch(`/portal/history.pdf?${historyQuery}`, { credentials: 'same-origin', headers: portalHeaders(), cache: 'no-store' });
     if (!response.ok) throw new Error('No se pudo exportar el PDF.');
     const url = URL.createObjectURL(await response.blob());
     const link = document.createElement('a'); link.href = url; link.download = 'historial-accesos.pdf'; link.click();
@@ -385,12 +401,7 @@ for (const id of ['history-filter','history-date','history-sede','history-role',
 };
 $('history-prev').onclick = () => loadHistory(false, historyPage - 1);
 $('history-next').onclick = () => { historyCursors[historyPage + 1] = historyNext; loadHistory(false, historyPage + 1); };
-document.querySelectorAll('.direction-choice').forEach(button => button.onclick = () => {
-  const direction = button.dataset.direction;
-  $('direction').value = direction;
-  document.querySelectorAll('.direction-choice').forEach(item => { const active = item === button; item.classList.toggle('active', active); item.setAttribute('aria-pressed', String(active)); });
-  $('validate-button').textContent = direction === 'exit' ? 'Validar salida' : 'Validar entrada';
-});
+
 $('scan-form').onsubmit = event => { event.preventDefault(); validate($('qr-value').value); };
 $('user-form').onsubmit = async event => {
   event.preventDefault(); if (creatingUser) return;
@@ -416,7 +427,7 @@ $('exception-form').onsubmit = async event => {
   const submit = $('exception-form').querySelector('[type=submit]');
   submit.disabled = true; $('exception-status').textContent = 'Registrando excepción…';
   try {
-    const result = await api('/portal/guard/exception', { userId: $('exception-user-id').value.trim(), type: $('exception-type').value, reason: $('exception-reason').value.trim() });
+    const result = await api('/portal/guard/exception', { userId: $('exception-user-id').value.trim(), type: 'entry', reason: $('exception-reason').value.trim() });
     $('exception-status').textContent = `${result.accessType === 'entry' ? 'Entrada' : 'Salida'} manual registrada para ${result.name || result.studentUid}.`;
     $('exception-form').reset();
   } catch (error) { $('exception-status').textContent = error.message; }
@@ -434,7 +445,20 @@ $('start-camera').onclick = async () => {
   try {
     if (!window.Html5Qrcode) throw new Error('El lector QR no pudo cargarse. Actualiza la página.');
     scanner ||= new Html5Qrcode('reader');
-    await scanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: (width, height) => { const side = Math.max(50, Math.min(240, Math.floor(Math.min(width, height) * 0.7))); return { width: side, height: side }; } }, value => { if (scanning && generation === cameraGeneration && !document.hidden) validate(value); });
+    let lastCode = '', lastSeen = -Infinity;
+    function onDecoded(value) {
+      if (!scanning || generation !== cameraGeneration || document.hidden) return;
+      const now = performance.now();
+      if (value === lastCode && now - lastSeen < 1000) {
+        lastSeen = now;
+        return;
+      }
+      if (busy || !navigator.onLine) return;
+      lastCode = value;
+      lastSeen = now;
+      void validate(value);
+    }
+    await scanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: (width, height) => { const side = Math.max(50, Math.min(240, Math.floor(Math.min(width, height) * 0.7))); return { width: side, height: side }; } }, onDecoded);
     scanning = true; $('stop-camera').disabled = false;
     const video = $('reader').querySelector('video');
     if (video) { video.setAttribute('playsinline', ''); video.muted = true; }
@@ -454,8 +478,8 @@ window.addEventListener('offline', updateConnection);
 window.addEventListener('online', updateConnection);
 updateConnection();
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) { stopCamera(); clearInterval(qrTimer); $('my-qr').hidden = true; clearAdminQr(); $('admin-qr-dialog').close(); }
-  else if (user && location.hash === '#qr') navigate();
+  if (document.hidden) { if (user && !$('qr-view').hidden) viewVersion++; stopCamera(); clearInterval(qrTimer); $('my-qr').hidden = true; clearAdminQr(); $('admin-qr-dialog').close(); }
+  else if (user && !$('qr-view').hidden) navigate();
 });
 window.addEventListener('hashchange', navigate);
 window.addEventListener('pagehide', () => { stopCamera(); clearInterval(qrTimer); });

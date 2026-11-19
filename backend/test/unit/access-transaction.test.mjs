@@ -20,9 +20,9 @@ test('atomic reducer returns nonce, presence, student timestamp, attendance and 
 test('replay and conflicts leave all collections untouched', () => {
   const { value } = applyDynamicAccess(initial(), command, 2000);
   assert.equal(applyDynamicAccess(value, command, 4000).result.reason, 'qr already used');
-  const conflict = applyDynamicAccess(value, { ...command, nonce: 'second' }, 4000);
+  const conflict = applyDynamicAccess(value, { ...command, nonce: 'second' }, 2100);
   assert.equal(conflict.value, undefined);
-  assert.equal(conflict.result.reason, 'user already inside');
+  assert.equal(conflict.result.reason, 'cooldown active');
 });
 
 test('transaction-local revocation overrides a stale active profile', () => {
@@ -48,6 +48,7 @@ test('independent retry after cooldown can succeed and explicit exit is consiste
   const exit = { ...command, type: 'exit', eventId: 'exit', nonce: 'exit' };
   assert.equal(applyDynamicAccess(first, exit, 2100).value, undefined);
   const next = applyDynamicAccess(first, exit, 4000);
-  assert.equal(next.value.accessState.person.inside, false);
-  assert.equal(Object.keys(next.value.accessHistory).length, 2);
+  assert.equal(next.result.reason, 'entry only');
+  const repeated = applyDynamicAccess(first, { ...exit, type: 'auto' }, 4000);
+  assert.equal(Object.keys(repeated.value.accessHistory).length, 2);
 });

@@ -423,13 +423,12 @@ async function resolveStaticAccessToken(token: string) {
   return { foundKey, tokenData };
 }
 
-async function commitAccessTransition(userId: string, requestedType: string, sessionId: string): Promise<{
+async function commitAccessTransition(userId: string, sessionId: string): Promise<{
   ok: true;
   accessType: AccessType;
   previousInside: boolean;
   newInside: boolean;
 } | { ok: false; reason: string }> {
-  const normalized = requestedType === "entry" || requestedType === "exit" ? requestedType : "auto";
   const stateRef = db.ref(`accessState/${userId}`);
   let rejectedReason: string | null = null;
   let acceptedTransition: { accessType: AccessType; previousInside: boolean; newInside: boolean } | null = null;
@@ -447,16 +446,7 @@ async function commitAccessTransition(userId: string, requestedType: string, ses
       return;
     }
 
-    const accessType: AccessType = normalized === "auto" ? (previousInside ? "exit" : "entry") : normalized;
-    if (accessType === "entry" && previousInside) {
-      rejectedReason = "user already inside";
-      return;
-    }
-    if (accessType === "exit" && !previousInside) {
-      rejectedReason = "user already outside";
-      return;
-    }
-
+    const accessType: AccessType = "entry";
     acceptedTransition = {
       accessType,
       previousInside,
@@ -648,53 +638,8 @@ app.get("/health", (_req, res) => {
   });
 });
 
-async function getCurrentPresence() {
-  const [stateSnap, studentsSnap] = await Promise.all([
-    db.ref("accessState").get(),
-    db.ref("students").get()
-  ]);
-  const states = stateSnap.val() || {};
-  const students = studentsSnap.val() || {};
-
-  return Object.keys(states)
-    .filter(id => states[id]?.inside === true)
-    .map(id => ({
-      id,
-      name: students[id]?.name || "Usuario sin nombre",
-      role: students[id]?.role || "sin rol",
-      sede: students[id]?.sede || students[id]?.campus || "sin sede",
-      tipoUsuario: students[id]?.tipoUsuario || students[id]?.role || "sin tipo",
-      inside: true,
-      lastAccessType: states[id]?.lastAccessType || "entry",
-      lastTimestamp: Number(states[id]?.lastTimestamp || 0),
-      sessionId: states[id]?.sessionId || "default"
-    }))
-    .sort((a, b) => b.lastTimestamp - a.lastTimestamp);
-}
-
-app.get("/presence", requireFirebaseAdmin, async (req, res) => {
-  try {
-    let data = await getCurrentPresence();
-    const sede = String(req.query.sede || "").trim().toLowerCase();
-    const tipo = String(req.query.tipo || req.query.role || "").trim().toLowerCase();
-    const fecha = String(req.query.fecha || req.query.date || "").trim();
-    const estado = String(req.query.estado || "inside").trim().toLowerCase();
-    if (estado && estado !== "inside") data = [];
-    if (sede) data = data.filter(person => person.sede.toLowerCase() === sede);
-    if (tipo) data = data.filter(person => person.tipoUsuario.toLowerCase() === tipo || person.role.toLowerCase() === tipo);
-    if (fecha) data = data.filter(person => new Date(person.lastTimestamp).toISOString().slice(0, 10) === fecha);
-    if ((req as any).admin) {
-      await logAdminAction(req, {
-        action: "presence.read",
-        entityType: "access_state",
-        metadata: { count: data.length, filters: { sede, tipo, fecha, estado } }
-      });
-    }
-    return res.json({ ok: true, generatedAt: Date.now(), count: data.length, data });
-  } catch (err) {
-    console.error("GET /presence error:", err);
-    return res.status(500).json({ ok: false, error: "server error" });
-  }
+app.get("/presence", requireFirebaseAdmin, (_req, res) => {
+  res.status(410).json({ ok: false, error: 'El registro de ingresos no permite determinar el aforo.' });
 });
 
 app.get("/admin/metrics", requireFirebaseAdmin, async (req, res) => {
@@ -703,12 +648,11 @@ app.get("/admin/metrics", requireFirebaseAdmin, async (req, res) => {
     const dayStart = now - 24 * 60 * 60 * 1000;
     const weekStart = now - 7 * 24 * 60 * 60 * 1000;
 
-    const [historySnap, shiftsSnap, usersSnap, guardsSnap, presence] = await Promise.all([
+    const [historySnap, shiftsSnap, usersSnap, guardsSnap] = await Promise.all([
       db.ref("accessHistory").orderByChild("timestamp").startAt(weekStart).get(),
       db.ref("guardShifts").get(),
       db.ref("students").get(),
-      db.ref("guards").get(),
-      getCurrentPresence()
+      db.ref("guards").get()
     ]);
 
     const historyVal = historySnap.val() || {};
@@ -716,7 +660,7 @@ app.get("/admin/metrics", requireFirebaseAdmin, async (req, res) => {
     const last24 = rows.filter((r: any) => Number(r.timestamp || 0) >= dayStart);
     const authorized24 = last24.filter((r: any) => r.authorized === true);
     const rejected24 = last24.filter((r: any) => r.authorized === false);
-    const manualOverrides24 = last24.filter((r: any) => r.reason === "manual_override");
+    const manualOverrides24 = last24.filter((r: any) => r.validationMode === "manual" || r.reason === "manual_override");
     const shiftsVal = shiftsSnap.val() || {};
     const shifts = Object.keys(shiftsVal).map(k => ({ id: k, ...(shiftsVal[k] || {}) }));
     const activeShifts = shifts.filter((s: any) => !s.endTimestamp && s.active !== false);
@@ -740,7 +684,7 @@ app.get("/admin/metrics", requireFirebaseAdmin, async (req, res) => {
         rejectedAccesses24h: rejected24.length,
         rejectionRate24h: last24.length ? Number((rejected24.length / last24.length).toFixed(4)) : 0,
         manualOverrides24h: manualOverrides24.length,
-        peopleCurrentlyInside: presence.length,
+        peopleCurrentlyInside: null,
         activeGuardShifts: activeShifts.length,
         registeredUsers: Object.keys(usersVal).length,
         registeredGuards: Object.keys(guardsVal).length
@@ -775,13 +719,13 @@ app.post("/validate", async (req, res, next) => {
 }, async (req, res) => {
   const rawToken = String(req.body?.qr || req.body?.qrToken || req.body?.token || "").trim();
   const sessionId = String(req.body?.sessionId || "default").trim() || "default";
-  const requestedType = String(req.body?.type || "auto").trim().toLowerCase();
+  const requestedType = String(req.body?.type ?? "entry").trim().toLowerCase();
   const now = Date.now();
 
   try {
   if ((req as any).guard) {
     const guardId = (req as any).guard.id;
-    const shifts = (await db.ref('guardShifts').get()).val() || {};
+    const shifts = (await db.ref('guardShifts').orderByChild('guardId').equalTo(guardId).get()).val() || {};
     const onShift = Object.entries(shifts).find(([, value]: [string, any]) => value?.guardId === guardId && value?.active !== false && !value?.endTimestamp);
     if (!onShift) {
       await logAccess({ request: req, authorized: false, reason: 'GUARD_NOT_ON_SHIFT', sessionId });
@@ -794,7 +738,7 @@ app.post("/validate", async (req, res, next) => {
     await logAccess({ request: req, authorized: false, reason: "token required", sessionId });
     return res.status(400).json({ ok: false, error: "token required" });
   }
-  if (!['entry', 'exit', 'auto'].includes(requestedType) || !sessionId || /[.#$\[\]/]/.test(sessionId)) {
+  if (!['entry', 'auto'].includes(requestedType) || !sessionId || /[.#$\[\]/]/.test(sessionId)) {
     await logAccess({ request: req, authorized: false, reason: 'invalid access request' });
     return res.status(400).json({ ok: false, reason: 'invalid access request' });
   }
@@ -914,7 +858,7 @@ app.post("/validate", async (req, res, next) => {
       }
     }
 
-    const transition = await commitAccessTransition(foundKey, requestedType, sessionId);
+    const transition = await commitAccessTransition(foundKey, sessionId);
     if (!transition.ok) {
       await logAccess({
         id: foundKey,

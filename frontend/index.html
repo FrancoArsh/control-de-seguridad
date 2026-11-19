@@ -93,14 +93,7 @@
 
       <div id="status" class="alert alert-secondary">Esperando escaneo...</div>
 
-      <div class="controls mb-2">
-        <label for="accessType" class="small-muted">Tipo de movimiento</label>
-        <select id="accessType" class="form-select" style="max-width:220px">
-          <option value="auto" selected>Automático</option>
-          <option value="entry">Registrar entrada</option>
-          <option value="exit">Registrar salida</option>
-        </select>
-      </div>
+
 
       <div class="d-flex align-items-center my-2 controls">
         <span id="led" class="led off"></span>
@@ -126,7 +119,6 @@ document.addEventListener("DOMContentLoaded", () => {
   const subText = document.getElementById('subText');
   const ledEl = document.getElementById('led');
   const readerEl = document.getElementById('reader');
-  const accessTypeEl = document.getElementById('accessType');
 
   function setStatus(kind, main, sub='') {
     statusEl.className = 'alert';
@@ -180,7 +172,7 @@ document.addEventListener("DOMContentLoaded", () => {
     setStatus("warning","Validando...","Conectando al servidor");
 
     const payload = parseQrPayload(decodedText);
-    payload.type = accessTypeEl.value;
+    payload.type = 'entry';
     const res = await sendToBackend(payload);
     
     let mainMessage = "✖ Acceso denegado";

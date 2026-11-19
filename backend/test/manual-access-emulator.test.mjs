@@ -35,11 +35,13 @@ test('manual exceptions preserve pending QR events and recover audit atomically'
     assert.deepEqual((await db.ref('accessState/person/_pendingAccess').get()).val(), pendingQr);
     assert.equal((await db.ref('accessState/person/inside').get()).val(), true);
     failPublication = false;
-    assert.equal((await commitManualAccess(controlled, manual('manual-exit', 'exit'))).ok, true);
+    await db.ref('accessState/person/lastTimestamp').set(0);
+    assert.equal((await commitManualAccess(controlled, manual('manual-repeat', 'entry'))).ok, true);
     assert.equal((await db.ref('accessHistory/qr-entry/validationMode').get()).val(), 'dynamic');
     assert.equal((await db.ref('dynamicQrNonces/pending-qr').get()).exists(), true);
-    assert.equal((await db.ref('accessHistory/manual-exit/validationMode').get()).val(), 'manual');
-    assert.equal((await db.ref('adminAuditLog/manual-exit/metadata/reason').get()).val(), 'Verified exception');
+    assert.equal((await db.ref('accessHistory/manual-repeat/validationMode').get()).val(), 'manual');
+    assert.equal((await db.ref('adminAuditLog/manual-repeat/metadata/reason').get()).val(), 'Verified exception');
+    await db.ref('accessState/person/lastTimestamp').set(0);
     failPublication = true;
     await assert.rejects(commitManualAccess(controlled, manual('manual-pending', 'entry')), AccessPublicationPending);
     assert.equal((await db.ref('accessState/person/inside').get()).val(), true);
@@ -51,7 +53,7 @@ test('manual exceptions preserve pending QR events and recover audit atomically'
     assert.equal((await db.ref('adminAuditLog/manual-pending').get()).exists(), true);
     assert.equal((await db.ref('adminAuditLog').get()).numChildren(), 2);
     assert.equal((await db.ref('accessState/person/_pendingAccess').get()).exists(), false);
-    await db.ref('accessState/person/inside').set(false);
+    await db.ref('accessState/person/lastTimestamp').set(0);
     const races = await Promise.all(Array.from({ length: 8 }, (_, i) => commitManualAccess(controlled,
       manual(`race-${i}`, 'entry', i % 2 ? 'g1' : 'g2'))));
     assert.equal(races.filter(result => result.ok).length, 1);

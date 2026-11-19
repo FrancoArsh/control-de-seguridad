@@ -159,8 +159,9 @@ test('QR dinamico: concurrencia, replay, salida y auditoria', async () => {
   await db.ref('accessState/dynamic-person/lastTimestamp').set(0);
   await db.ref('students/dynamic-person/lastAccessTimestamp').set(0);
   const exits = await Promise.all(Array.from({ length: 6 }, () => validate(headers, signedQr('dynamic-person'), 'exit')));
-  assert.equal(exits.filter(r => r.body.ok === true).length, 1);
-  assert.equal((await db.ref('accessState/dynamic-person').get()).val().inside, false);
+  assert.ok(exits.every(r => r.response.status === 400));
+  assert.equal((await validate(headers, signedQr('dynamic-person'), 'auto')).body.accessType, 'entry');
+  assert.equal((await db.ref('accessState/dynamic-person').get()).val().inside, true);
   const history = Object.values((await db.ref('accessHistory').get()).val() || {}).filter(row => row.id === 'dynamic-person');
   assert.equal(history.filter(row => row.authorized).length, 2);
   for (const row of history) {
@@ -237,8 +238,7 @@ test('estudiante y profesor: aislamiento de QR, historial, administracion y reno
     const renewed = await request('/portal/qr', { headers });
     assert.notEqual(renewed.body.token, qr.body.token);
     const history = await request('/portal/history', { headers });
-    assert.equal(history.response.status, 200);
-    assert.ok(history.body.data.every(row => row.id === user.uid));
+    assert.equal(history.response.status, 403);
     await getAuth(seedApp).updateUser(user.uid, { disabled: true });
     assert.equal((await request('/portal/qr', { headers })).response.status, 401);
   }
@@ -322,14 +322,34 @@ test('aísla las operaciones del portal por rol y revoca una sesión desactivada
 
   const memberDenied = ['/portal/users', '/portal/guards', '/portal/guard-report', '/portal/student-qr/stu-001', '/presence', '/portal/guard/shift'];
   for (const route of memberDenied) assert.equal((await request(route, { headers: memberHeaders })).response.status, 403, `member denied ${route}`);
-  for (const route of ['/portal/summary', '/portal/history', '/portal/qr']) {
+  for (const route of ['/portal/summary', '/portal/qr']) {
     assert.equal((await request(route, { headers: memberHeaders })).response.status, 200, `member allowed ${route}`);
   }
+  assert.equal((await request('/portal/history', { headers: memberHeaders })).response.status, 403, 'member history denied');
 
   const guardUid = (await db.ref('guards/guard-001/authUid').get()).val();
   await auth.updateUser(guardUid, { disabled: true });
   assert.equal((await request('/portal/me', { headers: guard })).response.status, 401);
   await auth.updateUser(guardUid, { disabled: false });
+});
+
+test('mantiene sesiones independientes entre pestañas del portal', async () => {
+  const adminLogin = await request('/portal/login', {
+    method: 'POST', headers: { 'x-portal-request': '1', 'x-portal-tab': 'tab-admin' },
+    body: JSON.stringify({ email: 'admin.integration@example.test', password: 'IntegrationPass123!' })
+  });
+  const guardLogin = await request('/portal/login', {
+    method: 'POST', headers: { 'x-portal-request': '1', 'x-portal-tab': 'tab-guard' },
+    body: JSON.stringify({ email: 'guard.integration@example.test', password: 'IntegrationPass123!' })
+  });
+  assert.equal(adminLogin.response.status, 200);
+  assert.equal(guardLogin.response.status, 200);
+  const adminHeaders = { 'x-portal-request': '1', 'x-portal-tab': 'tab-admin', 'x-portal-session': adminLogin.body.sessionToken };
+  const guardHeaders = { 'x-portal-request': '1', 'x-portal-tab': 'tab-guard', 'x-portal-session': guardLogin.body.sessionToken };
+  assert.equal((await request('/portal/me', { headers: adminHeaders })).body.user.role, 'admin');
+  assert.equal((await request('/portal/me', { headers: guardHeaders })).body.user.role, 'guard');
+  assert.equal((await request('/portal/users', { headers: adminHeaders })).response.status, 200);
+  assert.equal((await request('/portal/users', { headers: guardHeaders })).response.status, 403);
 });
 
 test('registra excepciones manuales solo en turno y deja auditoria', async () => {
@@ -374,10 +394,9 @@ test("valida concurrencia de salida y conserva un unico estado final", async () 
     method: "POST", headers: authorization,
     body: JSON.stringify({ qr: "integration-static-token", type: "exit", sessionId: "integration-exit" })
   })));
-  assert.equal(results.filter(({ body }) => body.ok === true).length, 1);
-  assert.equal(results.filter(({ body }) => body.ok !== true).length, 1);
+  assert.ok(results.every(r => r.response.status === 400));
   const state = (await seedDb.ref("accessState/stu-001").once("value")).val();
-  assert.equal(state.inside, false);
+  assert.equal(state.inside, true);
 });
 
 test("autentica el portal y aplica la sesion y el rol de administrador", async () => {
@@ -392,7 +411,7 @@ test("autentica el portal y aplica la sesion y el rol de administrador", async (
   assert.equal(me.response.status, 200);
   assert.equal(me.body.user.role, "admin");
   const presence = await portalRequest('/presence');
-  assert.equal(presence.response.status, 200);
+  assert.equal(presence.response.status, 410);
 
   const users = await portalRequest("/portal/users");
   assert.equal(users.response.status, 200);
@@ -440,4 +459,25 @@ test("autentica el portal y aplica la sesion y el rol de administrador", async (
   assert.equal(logout.response.status, 200);
   const afterLogout = await portalRequest("/portal/me");
   assert.equal(afterLogout.response.status, 401);
+});
+test('KPI de decisión HTTP en portería con credenciales sintéticas', async () => {
+  const db = getDatabase(seedApp);
+  const headers = await loginAs('guard.integration@example.test');
+  await db.ref('guardShifts/kpi').set({ guardId: 'guard-001', active: true, startTimestamp: Date.now() });
+  const ids = Array.from({ length: 30 }, (_, i) => 'kpi-student-' + i);
+  await db.ref().update(Object.fromEntries(ids.map(id => ['students/' + id, { active: true, role: 'estudiante' }])));
+  const samples = { aprobado: [], rechazado: [] };
+  for (const id of ids) {
+    const qr = signedQr(id);
+    for (const [outcome, expected] of [['aprobado', 200], ['rechazado', 409]]) {
+      const start = performance.now();
+      const result = await validate(headers, qr);
+      samples[outcome].push(performance.now() - start);
+      assert.equal(result.response.status, expected);
+    }
+  }
+  for (const [outcome, values] of Object.entries(samples)) {
+    values.sort((a, b) => a - b);
+    console.log('KPI', outcome, JSON.stringify({ n: values.length, p95Ms: Math.ceil(values[Math.ceil(values.length * .95) - 1]), maxMs: Math.ceil(values.at(-1)), bajoUnSegundo: values.filter(v => v < 1000).length }));
+  }
 });

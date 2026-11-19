@@ -44,10 +44,10 @@ export async function commitManualAccess(db: Database, command: ManualAccessComm
           return reject('GUARD_NOT_ON_SHIFT');
         }
         const previousInside = state.inside === true;
-        const accessType = command.type === 'auto' ? (previousInside ? 'exit' : 'entry') : command.type;
-        if (accessType === 'entry' && previousInside) return reject('user already inside');
-        if (accessType === 'exit' && !previousInside) return reject('user already outside');
-        const newInside = accessType === 'entry';
+        if (command.type === 'exit') return reject('entry only');
+        if (Date.now() - Number(state.lastTimestamp || 0) < 15000) return reject('cooldown active');
+        const accessType = 'entry';
+        const newInside = true;
         const event = {
           ...command.audit,
           id: command.userId,
