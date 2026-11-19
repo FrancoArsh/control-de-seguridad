@@ -2010,6 +2010,7 @@ app.post('/guards/create', requireFirebaseAdmin, async (req, res) => {
 });
 
 const frontendPath = path.resolve(__dirname, "../..", "frontend");
+app.get("/admin.html", (_req, res) => res.redirect(302, "/portal.html"));
 // Serve static files (css, js, images, html)
 app.use(express.static(frontendPath, { index: false }));
 

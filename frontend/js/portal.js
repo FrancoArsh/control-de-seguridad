@@ -2,7 +2,7 @@
 const $ = id => document.getElementById(id);
 let user, scanner, scanning = false, busy = false, viewVersion = 0, qrTimer;
 let cameraStarting = false, cameraGeneration = 0;
-let presence = [], history = [], guards = [];
+let history = [], guards = [];
 let filteredHistory = [];
 let guardCursors = [''], guardPage = 0, guardNext = null, guardTo = 0, guardRequest = 0;
 let historyCursors = [''], historyPage = 0, historyNext = null, historyQuery = '', historyRequest = 0, historyTimer;
@@ -37,21 +37,18 @@ document.querySelectorAll('.table-scroll').forEach(element => {
   element.setAttribute('role', 'region');
   element.setAttribute('aria-label', 'Tabla de registros');
 });
-const links = { inicio: ['Inicio', '⌂'], scan: ['Escanear QR', '▣'], presence: ['Personas dentro', '◉'], history: ['Historial', '≡'], qr: ['Mi código QR', '▦'], users: ['Usuarios', '♙'], guards: ['Guardias', '♜'] };
-const views = { inicio: 'home', scan: 'scan', presence: 'presence', history: 'history', qr: 'qr', users: 'users', guards: 'guards' };
+const links = { inicio: ['Inicio', '⌂'], scan: ['Escanear QR', '▣'], history: ['Historial', '≡'], qr: ['Mi código QR', '▦'], users: ['Usuarios', '♙'], guards: ['Guardias', '♜'] };
+const views = { inicio: 'home', scan: 'scan', history: 'history', qr: 'qr', users: 'users', guards: 'guards' };
 const allowed = () => user?.role === 'member' ? ['qr'] : user?.role === 'guard' ? ['inicio', 'scan', 'history'] : ['inicio', 'history', 'users', 'guards'];
 const date = value => value ? new Date(value).toLocaleString('es-CL') : 'Sin registros';
 const escape = value => String(value ?? '').replace(/[&<>"']/g, v => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[v]);
-const portalSessionKey = 'control_portal_session';
+sessionStorage.removeItem('control_portal_session'); // Remove credentials saved by earlier portal versions.
 const portalTabKey = 'control_portal_tab';
 const portalTab = sessionStorage.getItem(portalTabKey) || (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`);
 sessionStorage.setItem(portalTabKey, portalTab);
 
 function portalHeaders() {
-  const headers = { 'X-Portal-Request': '1', 'X-Portal-Tab': portalTab };
-  const token = sessionStorage.getItem(portalSessionKey);
-  if (token) headers['X-Portal-Session'] = token;
-  return headers;
+  return { 'X-Portal-Request': '1', 'X-Portal-Tab': portalTab };
 }
 
 async function api(path, body, method) {
@@ -91,16 +88,15 @@ async function showLogin() {
   clearAdminQr(); $('admin-qr-dialog').close(); $('edit-dialog').close(); editingUser = null;
   historyRequest++; clearTimeout(historyTimer); filteredHistory = []; historyQuery = '';
   user = null; viewVersion++; clearInterval(qrTimer); await stopCamera();
-  sessionStorage.removeItem(portalSessionKey);
   $('workspace').hidden = true; $('login').hidden = false; $('boot').hidden = true;
   $('password').value = ''; $('my-qr').removeAttribute('src');
-  $('presence-rows').replaceChildren(); $('history-rows').replaceChildren();
+  $('history-rows').replaceChildren();
   $('history-mobile').replaceChildren();
   $('user-rows').replaceChildren(); $('guard-rows').replaceChildren();
   $('guard-stats').replaceChildren();
   $('scan-result').textContent = ''; $('qr-value').value = ''; $('user-password').value = '';
   $('exception-form').reset(); $('exception-status').textContent = '';
-  history = []; presence = []; guards = [];
+  history = []; guards = [];
 }
 function navLink(key) { return `<a href="#${key}"><span class="nav-symbol" aria-hidden="true">${links[key][1]}</span>${links[key][0]}</a>`; }
 async function enter(profile) {
@@ -168,11 +164,6 @@ async function navigate() {
         };
       }
       if (user.role === 'guard') await loadGuardShift();
-    } else if (key === 'presence') {
-      $('presence-rows').replaceChildren();
-      const result = await api('/presence');
-      if (version !== viewVersion) return;
-      presence = result.data; renderPresence();
     } else if (key === 'history') {
       await loadHistory(true);
     } else if (key === 'qr') {
@@ -270,13 +261,6 @@ function renderUsers(rows) {
     try { await api(`/portal/users/${encodeURIComponent(button.dataset.userUid)}`, { active: button.dataset.userActive === 'true' }, 'PATCH'); await navigate(); }
     catch (error) { $('status').textContent = error.message; button.disabled = false; }
   }));
-}
-function renderPresence() {
-  const filter = $('presence-filter').value.toLowerCase(), sede = $('presence-sede').value.toLowerCase(), role = $('presence-role').value.toLowerCase(), day = $('presence-date').value;
-  const localDay = timestamp => { const d = new Date(timestamp); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; };
-  const rows = presence.filter(v => `${v.name} ${v.id}`.toLowerCase().includes(filter) && (!sede || String(v.sede || '').toLowerCase().includes(sede)) && (!role || `${v.role} ${v.tipoUsuario}`.toLowerCase().includes(role)) && (!day || localDay(v.lastTimestamp) === day));
-  $('presence-count').textContent = `${rows.length} de ${presence.length} personas dentro`;
-  $('presence-rows').innerHTML = rows.map(v => `<tr><td>${escape(v.name)}</td><td>${escape(v.id)}</td><td>${escape(v.sede || 'Sin sede')}</td><td>${escape(v.tipoUsuario || v.role || 'Sin tipo')}</td><td>${v.lastAccessType === 'entry' ? 'Entrada' : 'Salida'}</td><td>${escape(date(v.lastTimestamp))}</td></tr>`).join('') || '<tr><td colspan="6" class="empty">No hay personas que mostrar.</td></tr>';
 }
 async function loadHistory(reset = false, target = historyPage) {
   const request = ++historyRequest, version = viewVersion;
@@ -438,7 +422,7 @@ async function validate(value) {
 }
 $('login-form').addEventListener('submit', async event => {
   event.preventDefault(); $('login-button').disabled = true; $('login-error').textContent = '';
-  try { const data = await api('/portal/login', { email: $('email').value.trim(), password: $('password').value }); sessionStorage.setItem(portalSessionKey, data.sessionToken); $('password').value = ''; await enter(data.user); }
+  try { const data = await api('/portal/login', { email: $('email').value.trim(), password: $('password').value }); $('password').value = ''; await enter(data.user); }
   catch (error) { $('login-error').textContent = error.message; }
   finally { $('login-button').disabled = false; }
 });
@@ -454,7 +438,7 @@ $('logout').onclick = async () => {
   $('logout').disabled = true;
   try {
     await api('/portal/logout', {});
-    for (const key of ['idToken','admin_user','admin_uid','guard_auth_token','guard_auth_guardid', portalSessionKey]) { localStorage.removeItem(key); sessionStorage.removeItem(key); }
+    for (const key of ['idToken','admin_user','admin_uid','guard_auth_token','guard_auth_guardid']) { localStorage.removeItem(key); sessionStorage.removeItem(key); }
     await showLogin(); location.hash = '';
   } catch (error) { $('status').textContent = error.message; }
   finally { $('logout').disabled = false; }
@@ -500,7 +484,6 @@ $('download-pdf').onclick = async () => {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   } catch (error) { $('status').textContent = error.message; }
 };
-for (const id of ['presence-filter','presence-sede','presence-role','presence-date']) $(id).oninput = renderPresence;
 for (const id of ['history-filter','history-date','history-sede','history-role','history-result']) $(id).oninput = () => {
   clearTimeout(historyTimer); historyRequest++;
   for (const control of ['history-prev', 'history-next', 'download-csv', 'download-pdf']) $(control).disabled = true;
@@ -558,7 +541,7 @@ $('start-camera').onclick = async () => {
   const version = viewVersion;
   try {
     if (!window.Html5Qrcode) throw new Error('El lector QR no pudo cargarse. Actualiza la página.');
-    scanner ||= new Html5Qrcode('reader');
+    scanner ||= new Html5Qrcode('reader', { formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE] });
     let lastCode = '', lastSeen = -Infinity;
     function onDecoded(value) {
       if (!scanning || generation !== cameraGeneration || document.hidden) return;
@@ -572,7 +555,7 @@ $('start-camera').onclick = async () => {
       lastSeen = now;
       void validate(value);
     }
-    await scanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: (width, height) => { const side = Math.max(50, Math.min(240, Math.floor(Math.min(width, height) * 0.7))); return { width: side, height: side }; } }, onDecoded);
+    await scanner.start({ facingMode: 'environment' }, { fps: 15, qrbox: (width, height) => { const side = Math.max(50, Math.min(240, Math.floor(Math.min(width, height) * 0.7))); return { width: side, height: side }; } }, onDecoded);
     scanning = true; $('stop-camera').disabled = false;
     const video = $('reader').querySelector('video');
     if (video) { video.setAttribute('playsinline', ''); video.muted = true; }

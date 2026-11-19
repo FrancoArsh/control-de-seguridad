@@ -15,15 +15,19 @@ import { AccessPublicationPending } from './access-transaction';
 type Profile = { uid: string; id: string; role: 'admin' | 'guard' | 'member'; name: string };
 const cookieName = 'control_session';
 const digest = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
-const sessionKey = (req: Request) => {
-  // The browser shares cookies between tabs. A tab session header takes precedence;
-  // when a tab has no token yet, ignore the shared cookie so a second login cannot
-  // inherit the session from another tab.
-  const headerToken = req.get('X-Portal-Session');
-  const tabHeader = req.get('X-Portal-Tab');
-  const raw = headerToken || (tabHeader ? null : (req.headers.cookie || '').split(';').map(v => v.trim()).find(v => v.startsWith(`${cookieName}=`))?.slice(cookieName.length + 1));
+function sessionCookie(req: Request) {
+  const tab = req.get('X-Portal-Tab');
+  if (tab === undefined) return cookieName;
+  return /^[A-Za-z0-9.-]{1,64}$/.test(tab) ? cookieName + '_' + tab : null;
+}
+
+function sessionKey(req: Request) {
+  const name = sessionCookie(req);
+  if (!name) return null;
+  const prefix = name + '=';
+  const raw = (req.headers.cookie || '').split(';').map(v => v.trim()).find(v => v.startsWith(prefix))?.slice(prefix.length);
   return raw && /^[a-f0-9]{64}$/.test(raw) ? digest(raw) : null;
-};
+}
 
 export function installPortal(app: Router, db: Database, qr: (id: string) => Promise<any>, qrStatus: (id: string, token: string) => Promise<{ renew: boolean }>) {
   const router = Router();
@@ -106,6 +110,8 @@ export function installPortal(app: Router, db: Database, qr: (id: string) => Pro
   router.use((_req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); });
   router.post('/login', async (req, res) => {
     if (req.headers['x-portal-request'] !== '1') return res.status(403).json({ ok: false, error: 'Solicitud no autorizada.' });
+    const name = sessionCookie(req);
+    if (!name) return res.status(400).json({ ok: false, error: 'Identificador de pestaña inválido.' });
     const email = String(req.body?.email || '').trim();
     const password = req.body?.password;
     if (!email.includes('@') || email.length > 254 || typeof password !== 'string' || !password || password.length > 1024) {
@@ -129,9 +135,9 @@ export function installPortal(app: Router, db: Database, qr: (id: string) => Pro
       await db.ref(`portalSessions/${digest(value)}`).set({ ...current, expiresAt: now + maxAge });
       const oldKey = sessionKey(req);
       if (oldKey) await db.ref(`portalSessions/${oldKey}`).remove();
-      res.cookie(cookieName, value, { ...cookieOptions, maxAge });
+      res.cookie(name, value, { ...cookieOptions, maxAge });
       attempts.delete(attemptKey);
-      return res.json({ ok: true, user: current, sessionToken: value });
+      return res.json({ ok: true, user: current });
     } catch (error: any) {
       const code = error.response?.data?.error?.message || '';
       if (['INVALID_LOGIN_CREDENTIALS', 'EMAIL_NOT_FOUND', 'INVALID_PASSWORD', 'USER_DISABLED'].includes(code)) {
@@ -162,7 +168,8 @@ export function installPortal(app: Router, db: Database, qr: (id: string) => Pro
     try {
       const key = sessionKey(req);
       if (key) await db.ref(`portalSessions/${key}`).remove();
-      if (!req.get('X-Portal-Session')) res.clearCookie(cookieName, cookieOptions);
+      const name = sessionCookie(req);
+      if (name) res.clearCookie(name, cookieOptions);
       res.json({ ok: true });
     } catch { res.status(503).json({ ok: false, error: 'No se pudo cerrar la sesion. Reintenta.' }); }
   });

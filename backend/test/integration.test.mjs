@@ -132,7 +132,8 @@ async function loginAs(email) {
 }
 
 function signedQr(id, options = {}) {
-  const payload = { v: 2, purpose: 'access', sub: id, iat: Date.now(), exp: Date.now() + 60000, nonce: crypto.randomBytes(16).toString('hex'), ...options };
+  const issuedAt = Date.now();
+  const payload = { v: 2, purpose: 'access', sub: id, iat: issuedAt, exp: issuedAt + 60000, nonce: crypto.randomBytes(16).toString('hex'), ...options };
   const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
   return `${encoded}.${crypto.createHmac('sha256', 'integration-qr-secret').update(encoded).digest('base64url')}`;
 }
@@ -344,12 +345,36 @@ test('mantiene sesiones independientes entre pestañas del portal', async () => 
   });
   assert.equal(adminLogin.response.status, 200);
   assert.equal(guardLogin.response.status, 200);
-  const adminHeaders = { 'x-portal-request': '1', 'x-portal-tab': 'tab-admin', 'x-portal-session': adminLogin.body.sessionToken };
-  const guardHeaders = { 'x-portal-request': '1', 'x-portal-tab': 'tab-guard', 'x-portal-session': guardLogin.body.sessionToken };
+  const student = await getAuth(seedApp).createUser({ email: 'student.tabs@example.test', password: 'IntegrationPass123!' });
+  await getDatabase(seedApp).ref('students/' + student.uid).set({ name: 'Estudiante de prueba', active: true, tipoUsuario: 'estudiante' });
+  const studentLogin = await request('/portal/login', {
+    method: 'POST', headers: { 'x-portal-request': '1', 'x-portal-tab': 'tab-student' },
+    body: JSON.stringify({ email: student.email, password: 'IntegrationPass123!' })
+  });
+  assert.equal(studentLogin.response.status, 200);
+  const cookies = [adminLogin, guardLogin, studentLogin].map(login => {
+    const cookie = login.response.headers.get('set-cookie');
+    assert.match(cookie, /; HttpOnly/i);
+    assert.equal(login.body.sessionToken, undefined);
+    return cookie.split(';')[0];
+  }).join('; ');
+  const adminHeaders = { cookie: cookies, 'x-portal-request': '1', 'x-portal-tab': 'tab-admin' };
+  const guardHeaders = { ...adminHeaders, 'x-portal-tab': 'tab-guard' };
+  assert.equal((await request('/portal/me', { headers: { ...guardHeaders, 'x-portal-tab': 'tab-new' } })).response.status, 401);
   assert.equal((await request('/portal/me', { headers: adminHeaders })).body.user.role, 'admin');
   assert.equal((await request('/portal/me', { headers: guardHeaders })).body.user.role, 'guard');
   assert.equal((await request('/portal/users', { headers: adminHeaders })).response.status, 200);
   assert.equal((await request('/portal/users', { headers: guardHeaders })).response.status, 403);
+  const studentHeaders = { ...adminHeaders, 'x-portal-tab': 'tab-student' };
+  assert.equal((await request('/portal/users', { headers: studentHeaders })).response.status, 403);
+  const logout = await request('/portal/logout', { method: 'POST', headers: guardHeaders, body: '{}' });
+  assert.equal(logout.response.status, 200);
+  assert.match(logout.response.headers.get('set-cookie'), /^control_session_tab-guard=;/);
+  assert.equal((await request('/portal/me', { headers: guardHeaders })).response.status, 401);
+  const qr = await request('/portal/qr', { headers: studentHeaders });
+  assert.equal(qr.response.status, 200);
+  assert.equal(JSON.parse(Buffer.from(qr.body.token.split('.')[0], 'base64url')).sub, student.uid);
+  assert.equal((await request('/portal/users', { headers: adminHeaders })).response.status, 200);
 });
 
 test('registra excepciones manuales solo en turno y deja auditoria', async () => {
