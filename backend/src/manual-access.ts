@@ -4,6 +4,7 @@ import { flushPendingAccess, AccessPublicationPending } from './access-transacti
 
 export type ManualAccessCommand = {
   userId: string;
+  visitor?: { name: string; rut: string };
   type: 'entry' | 'exit' | 'auto';
   sessionId: string;
   eventId: string;
@@ -25,14 +26,14 @@ export async function commitManualAccess(db: Database, command: ManualAccessComm
       for (let attempt = 0; attempt < 3; attempt++) {
       await flushPendingAccess(db, command.userId);
       const [student, guard, shift] = await Promise.all([
-        db.ref(`students/${command.userId}`).get(),
+        command.visitor ? null : db.ref(`students/${command.userId}`).get(),
         db.ref(`guards/${command.audit.guardId}`).get(),
         db.ref(`guardShifts/${command.audit.shiftId}`).get()
       ]);
       await ref.get();
       const result = await ref.transaction(current => {
         const state = current || {};
-        const person = student.val();
+        const person = command.visitor ? { name: command.visitor.name } : student?.val();
         const guardValue = guard.val();
         const shiftValue = shift.val();
         const reject = (reason: string) => { decision = { ok: false, reason }; return; };
@@ -51,7 +52,7 @@ export async function commitManualAccess(db: Database, command: ManualAccessComm
         const event = {
           ...command.audit,
           id: command.userId,
-          studentUid: command.userId,
+          ...(command.visitor ? { rut: command.visitor.rut } : { studentUid: command.userId }),
           name: person.name || null,
           sede: person.sede || person.campus || null,
           tipoUsuario: person.tipoUsuario || person.role || null,

@@ -15,6 +15,18 @@ import { AccessPublicationPending } from './access-transaction';
 type Profile = { uid: string; id: string; role: 'admin' | 'guard' | 'member'; name: string };
 const cookieName = 'control_session';
 const digest = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
+function normalizeRut(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const input = value.trim().toUpperCase();
+  if (!/^(?:[1-9]\d{0,7}|[1-9]\d{0,2}(?:\.\d{3}){1,2})-?[0-9K]$/.test(input)) return null;
+  const compact = input.replace(/[.-]/g, '');
+  const digits = compact.slice(0, -1);
+  if (digits.length > 8) return null;
+  const sum = [...digits].reverse().reduce((total, digit, index) => total + Number(digit) * (2 + index % 6), 0);
+  const expected = '0123456789K'[(11 - sum % 11) % 11];
+  return expected === compact.slice(-1) ? digits + '-' + expected : null;
+}
+
 function sessionCookie(req: Request) {
   const tab = req.get('X-Portal-Tab');
   if (tab === undefined) return cookieName;
@@ -416,7 +428,14 @@ export function installPortal(app: Router, db: Database, qr: (id: string) => Pro
   router.post('/guard/exception', async (req, res) => {
     const user: Profile = (req as any).portal;
     if (user.role !== 'guard') return res.status(403).json({ ok: false, error: 'Solo guardias pueden registrar excepciones.' });
-    const userId = String(req.body?.userId || '').trim();
+    const isVisitor = req.body?.rut !== undefined || req.body?.name !== undefined;
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+    const rut = normalizeRut(req.body?.rut);
+    if (isVisitor && (!rut || name.length < 2 || name.length > 160)) {
+      return res.status(400).json({ ok: false, error: 'Ingresa el nombre y un RUT válido con dígito verificador.' });
+    }
+    const visitor = isVisitor && rut ? { name, rut } : undefined;
+    const userId = visitor ? 'manual-' + digest(visitor.rut) : String(req.body?.userId || '').trim();
     const type = String(req.body?.type ?? 'entry').trim().toLowerCase();
     const reason = String(req.body?.reason || '').trim();
     const sessionId = String(req.body?.sessionId || 'default').trim() || 'default';
@@ -435,7 +454,7 @@ export function installPortal(app: Router, db: Database, qr: (id: string) => Pro
       if (!shift) return res.status(403).json({ ok: false, error: 'Debes iniciar tu turno antes de registrar una excepcion.', reason: 'GUARD_NOT_ON_SHIFT' });
       const eventId = db.ref('accessHistory').push().key!;
       const result = await commitManualAccess(db, {
-        userId, type: type as 'entry' | 'exit' | 'auto', sessionId, eventId, reason,
+        userId, visitor, type: type as 'entry' | 'exit' | 'auto', sessionId, eventId, reason,
         audit: { validatedById: user.uid, validatedByName: user.name, validatedByRole: 'guard', guardId: user.id, shiftId: shift.id, validatorIp: req.ip || null, validatorUserAgent: req.headers['user-agent'] || null }
       });
       if (!result.ok) {

@@ -384,6 +384,21 @@ test('registra excepciones manuales solo en turno y deja auditoria', async () =>
   await db.ref(`students/${id}`).set({ name: 'Persona manual', active: true, tipoUsuario: 'visitante' });
   await db.ref('guardShifts/manual-exception-shift').set({ guardId: 'guard-001', active: true, startTimestamp: Date.now() });
 
+  const visit = { name: 'Visita sintética', rut: '12.345.678-5', reason: 'Reunión de prueba' };
+  const register = body => request('/portal/guard/exception', { method: 'POST', headers: guard, body: JSON.stringify(body) });
+  assert.equal((await register({ ...visit, rut: '12.345.678-4' })).response.status, 400);
+  assert.equal((await register(visit)).response.status, 201);
+  const admin = await loginAs('admin.integration@example.test');
+  for (const headers of [guard, admin]) {
+    const page = await request('/portal/history', { headers });
+    assert.equal(page.response.status, 200);
+    const event = page.body.data.find(row => row.rut === '12345678-5');
+    assert.equal(event?.name, visit.name);
+    assert.equal(event?.reason, visit.reason);
+    assert.equal(event?.validationMode, 'manual');
+    assert.equal(event?.accessType, 'entry');
+  }
+
   const invalid = await request('/portal/guard/exception', {
     method: 'POST', headers: guard, body: JSON.stringify({ userId: id, type: 'entry', reason: '' })
   });

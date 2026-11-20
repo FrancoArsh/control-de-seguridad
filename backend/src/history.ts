@@ -53,7 +53,7 @@ export async function readHistoryPage(db: Database, user: Viewer, query: Record<
     const missing = [...new Set(entries.filter(({ row }) => row && typeof row === 'object')
       .filter(({ row }) => user.role === 'admin' || (user.role === 'member'
         ? String(row.studentUid || row.id || '') === user.id : row.validatedById === user.uid || row.guardId === user.id))
-      .filter(({ row }) => !row.name || !row.sede || !row.tipoUsuario)
+      .filter(({ row }) => !row.rut && (!row.name || !row.sede || !row.tipoUsuario))
       .map(({ row }) => String(row.studentUid || row.id || '')))]
       .filter(id => id && !/[.#$\[\]/\u0000-\u001f\u007f]/.test(id) && !profiles.has(id));
     for (let offset = 0; offset < missing.length; offset += 8) {
@@ -71,14 +71,14 @@ export async function readHistoryPage(db: Database, user: Viewer, query: Record<
       if (filters.outcome !== 'all' && (row.authorized === true) !== (filters.outcome === 'yes')) continue;
       const person: any = profiles.get(id) || {};
       const item = {
-        key, id, name: String(row.name || row.studentName || person.name || id || 'Sin identificar'),
+        key, id, rut: String(row.rut || ''), validationMode: row.validationMode || null, name: String(row.name || row.studentName || person.name || id || 'Sin identificar'),
         timestamp: Number(row.timestamp), accessType: row.accessType || null,
         authorized: row.authorized === true, reason: String(row.reason || (row.authorized === true ? 'ok' : 'Sin motivo registrado')),
         sede: String(row.sede || row.campus || person.sede || person.campus || 'Sin sede'),
         tipoUsuario: String(row.tipoUsuario || row.role || person.tipoUsuario || person.role || 'Sin tipo'),
         validatedBy: String(row.validatedByName || row.validatedById || 'Sin registrar'), validatedByRole: String(row.validatedByRole || '')
       };
-      if (!`${item.name} ${id}`.toLowerCase().includes(filters.search) || !item.sede.toLowerCase().includes(filters.sede) ||
+      if (!`${item.name} ${id} ${item.rut}`.toLowerCase().includes(filters.search) || !item.sede.toLowerCase().includes(filters.sede) ||
           !`${item.tipoUsuario} ${item.validatedByRole}`.toLowerCase().includes(filters.role)) continue;
       data.push(item);
       if (data.length === filters.limit) break;
