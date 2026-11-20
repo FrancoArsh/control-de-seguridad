@@ -3,11 +3,13 @@ name: Docker build
 on:
   push:
     paths:
+      - ".dockerignore"
       - "backend/**"
       - "frontend/**"
       - ".github/workflows/docker-build.yml"
   pull_request:
     paths:
+      - ".dockerignore"
       - "backend/**"
       - "frontend/**"
       - ".github/workflows/docker-build.yml"

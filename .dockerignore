@@ -1,0 +1,22 @@
+# Build from the repository root using backend/Dockerfile.
+# Only build inputs and public web assets are sent to the builder.
+**
+!backend/
+backend/**
+!backend/Dockerfile
+!backend/package.json
+!backend/package-lock.json
+!backend/tsconfig.json
+!backend/src/
+backend/src/**
+!backend/src/**/*.ts
+!frontend/
+frontend/**
+!frontend/*.html
+!frontend/css/
+frontend/css/**
+!frontend/css/*.css
+!frontend/js/
+frontend/js/**
+!frontend/js/*.js
+!frontend/js/*.mjs
