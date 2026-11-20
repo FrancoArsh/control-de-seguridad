@@ -193,6 +193,10 @@ test("eliminación individual de visita conserva a terceros y es repetible", asy
     fixture["accessState/" + id] = { _pendingAccess: { event: description, status: "pending" } };
   }
   await db.ref().update(fixture);
+  const previousBackup = await runScript("backup-rtdb.mjs", [
+    "--output=" + outputDir, "--file=before-erasure.json", "--encrypt=true"
+  ]);
+  assert.equal(previousBackup.encrypted, true);
   const call = (...flags) => runScript("delete-personal-data.mjs", ["--id=" + visitor, ...flags]);
   const expected = { accessHistory: 1, adminAuditLog: 1, attendanceSessions: 2, accessState: 1 };
   assert.deepEqual((await call()).counts, expected);
@@ -208,4 +212,14 @@ test("eliminación individual de visita conserva a terceros y es repetible", asy
     .filter(record => record.action === "visitor_data.delete");
   assert.equal(receipts.length, 1);
   assert.deepEqual(Object.keys(receipts[0]).sort(), ["action", "counts", "timestamp"]);
+
+  // A recovery from an older snapshot must reapply the approved erasure before reopening.
+  await runScript("restore-rtdb.mjs", ["--file=" + previousBackup.outputPath, "--apply=true"]);
+  assert.deepEqual((await call()).counts, expected);
+  await call("--confirm=true", "--writers-stopped=true");
+  assert.deepEqual((await call()).counts, { accessHistory: 0, adminAuditLog: 0, attendanceSessions: 0, accessState: 0 });
+  for (const [key, original] of Object.entries(fixture)) {
+    assert.deepEqual((await db.ref(key).get()).val(), key.includes(visitor) ? null : original);
+  }
+  console.log("Recuperación previa al borrado: solicitud reaplicada, visita eliminada, tercera persona intacta.");
 });
