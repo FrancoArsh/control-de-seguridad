@@ -3,13 +3,13 @@
     ".read": false,
     ".write": false,
     "accessHistory": {
-      ".indexOn": ["timestamp", "studentUid", "guardId", "shiftId"]
+      ".indexOn": ["timestamp", "id", "studentUid", "guardId", "shiftId"]
     },
     "accessState": {
       ".indexOn": ["_pendingAccess/status"]
     },
     "adminAuditLog": {
-      ".indexOn": ["timestamp", "actorId"]
+      ".indexOn": ["timestamp", "actorId", "entityId"]
     },
     "securityEvents": {
       ".indexOn": ["timestamp", "type", "outcome"]

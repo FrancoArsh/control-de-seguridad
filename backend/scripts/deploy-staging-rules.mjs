@@ -10,6 +10,11 @@ const databaseURL = `https://${projectId}-default-rtdb.firebaseio.com`;
 if (process.env.FIREBASE_DATABASE_EMULATOR_HOST) throw new Error('Remove emulator configuration before remote verification.');
 const serviceAccount = JSON.parse(await readFile(resolve('serviceAccount.staging.json'), 'utf8'));
 if (serviceAccount.project_id !== projectId) throw new Error('Credential does not belong to staging.');
+// Firebase indexes are unordered; permission expressions must still match exactly.
+function comparableRules(rules) {
+  return JSON.parse(JSON.stringify(rules, (key, value) =>
+    key === '.indexOn' && Array.isArray(value) ? [...value].sort() : value));
+}
 const desired = JSON.parse(await readFile(resolve('database.rules.json'), 'utf8'));
 if (desired.rules['.read'] !== false || desired.rules['.write'] !== false) throw new Error('Default deny required.');
 const app = initializeApp({ projectId, databaseURL, credential: cert(serviceAccount) }, 'staging-rules');
@@ -25,7 +30,7 @@ try {
     console.log(`Previous rules backed up: ${backup}`);
   }
   const actual = await db.getRulesJSON();
-  if (!isDeepStrictEqual(actual, desired)) throw new Error('Remote rules differ from repository. Run with --apply to deploy.');
+  if (!isDeepStrictEqual(comparableRules(actual), comparableRules(desired))) throw new Error('Remote rules differ from repository. Run with --apply to deploy.');
   // Requests are anonymous and read-only; both must be rejected by deployed rules.
   for (const path of ['accessHistory', 'accessState']) {
     const response = await fetch(`${databaseURL}/${path}.json?shallow=true`, { signal: AbortSignal.timeout(15000) });

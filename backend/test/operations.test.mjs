@@ -171,3 +171,41 @@ test("retención opera en preview y luego aplica el borrado", async () => {
   assert.equal((await db.ref("dynamicQrNonces/expired").once("value")).exists(), false);
   assert.equal((await db.ref("dynamicQrNonces/active").once("value")).exists(), true);
 });
+
+test("eliminación individual de visita conserva a terceros y es repetible", async () => {
+  assert.match(projectId, /^demo-/);
+  const db = getDatabase(seedApp);
+  const visitor = "manual-" + "a".repeat(64);
+  const other = "manual-" + "b".repeat(64);
+  const ruleFile = await fs.readFile(path.join(root, "database.rules.json"), "utf8");
+  assert.match(emulatorHost, /^(127\.0\.0\.1|localhost):\d+$/);
+  const published = await fetch(`http://${emulatorHost}/.settings/rules.json?ns=${projectId}`, {
+    method: "PUT", headers: { Authorization: "Bearer owner", "Content-Type": "application/json" }, body: ruleFile
+  });
+  assert.equal(published.status, 200);
+  const fixture = {};
+  for (const id of [visitor, other]) {
+    const description = { id, name: "Visita sintética", rut: "RUT de prueba", reason: "Consulta" };
+    fixture["accessHistory/" + id] = description;
+    fixture["adminAuditLog/" + id] = { entityId: id, metadata: { reason: "Consulta" } };
+    fixture["attendance/default/" + id + "/evt"] = { type: "entry" };
+    fixture["attendance/sesion-antigua/" + id + "/evt-retirado-del-historial"] = { type: "entry" };
+    fixture["accessState/" + id] = { _pendingAccess: { event: description, status: "pending" } };
+  }
+  await db.ref().update(fixture);
+  const call = (...flags) => runScript("delete-personal-data.mjs", ["--id=" + visitor, ...flags]);
+  const expected = { accessHistory: 1, adminAuditLog: 1, attendanceSessions: 2, accessState: 1 };
+  assert.deepEqual((await call()).counts, expected);
+  await assert.rejects(call("--confirm=true"), /writers-stopped/);
+  assert.deepEqual((await call("--writers-stopped=true", "--confirm=true")).counts, expected);
+  for (const [key, original] of Object.entries(fixture)) {
+    const current = (await db.ref(key).get()).val();
+    assert.deepEqual(current, key.includes(visitor) ? null : original);
+  }
+  assert.deepEqual((await call("--confirm=true", "--writers-stopped=true")).counts,
+    { accessHistory: 0, adminAuditLog: 0, attendanceSessions: 0, accessState: 0 });
+  const receipts = Object.values((await db.ref("adminAuditLog").get()).val())
+    .filter(record => record.action === "visitor_data.delete");
+  assert.equal(receipts.length, 1);
+  assert.deepEqual(Object.keys(receipts[0]).sort(), ["action", "counts", "timestamp"]);
+});

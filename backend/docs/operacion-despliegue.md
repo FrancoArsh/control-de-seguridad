@@ -26,6 +26,8 @@ La restauracion no recupera contrasenas Auth, sesiones ni nonces QR. El tiempo d
 
 La retencion elimina eventos vencidos y nonces expirados. La eliminacion individual requiere una solicitud aprobada y `delete-personal-data.mjs --id=<id> --confirm=true`; deja un registro minimo de auditoria. La eliminacion de la identidad Firebase Auth debe ejecutarse separadamente con el UID confirmado. Antes de aplicar se debe revisar obligacion legal, necesidad de conservar evidencias y alcance de la solicitud.
 
+Para una visita, usar el identificador interno `manual-<hash>` del evento. Verificar el ambiente y ejecutar `node scripts/delete-personal-data.mjs --id=<id>` para inventariar historial, auditoría, asistencia por sesión y estado de acceso. Para aplicar durante una ventana de mantenimiento, detener todos los escritores (incluida la recuperación de publicaciones), repetir el inventario y añadir `--confirm=true --writers-stopped=true`. La operación elimina los registros identificados y deja un comprobante con fecha y cantidades. Repetir la vista previa y verificar cantidades en cero antes de reabrir. Registrar aparte los respaldos y exportaciones afectados, su vencimiento y la necesidad de reaplicar la solicitud si se restaura una copia anterior. El alcance del comando es la base operativa. Desplegar los índices de `accessHistory/id` y `adminAuditLog/entityId` definidos en las reglas del repositorio.
+
 ## HTTPS y despliegue
 
 Antes de publicar:
