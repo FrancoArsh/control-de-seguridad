@@ -43,7 +43,12 @@ jobs:
           node --input-type=module <<'NODE'
           import { encryptBackup } from './scripts/backup-crypto.mjs';
           const project = 'control-seguridad-staging';
-          const raw = process.env.FIREBASE_SERVICE_ACCOUNT || '';
+          const required = { STAGING_FIREBASE_SERVICE_ACCOUNT: 'FIREBASE_SERVICE_ACCOUNT',
+            STAGING_FIREBASE_DATABASE_URL: 'FIREBASE_DATABASE_URL', STAGING_FIREBASE_PROJECT_ID: 'GCLOUD_PROJECT',
+            STAGING_BACKUP_ENCRYPTION_KEY: 'BACKUP_ENCRYPTION_KEY' };
+          const missing = Object.entries(required).filter(([, key]) => !process.env[key]?.trim()).map(([name]) => name);
+          if (missing.length) throw Error('Missing staging secrets: ' + missing.join(', '));
+          const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
           let account;
           try { account = JSON.parse(raw.trim().startsWith('{') ? raw : Buffer.from(raw, 'base64').toString()); }
           catch { throw Error('Missing or invalid STAGING_FIREBASE_SERVICE_ACCOUNT'); }
@@ -97,6 +102,6 @@ jobs:
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: `Backup staging fallido: ${context.run_id}`,
-              body: `El scheduler de respaldo staging fallo. Revisar la ejecucion ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.run_id}.`
+              title: `Backup staging fallido: ${context.runId}`,
+              body: `Falló la comprobación del respaldo de staging. Revisar la ejecucion ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}.`
             });
