@@ -20,6 +20,7 @@ const defaultCollections = [
   "guardShifts",
   "guardAuthorizations",
   "accessHistory",
+  "attendance",
   "adminAuditLog",
   "securityEvents"
 ];

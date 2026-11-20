@@ -531,3 +531,73 @@ test('KPI de decisión HTTP en portería con credenciales sintéticas', async ()
     console.log('KPI', outcome, JSON.stringify({ n: values.length, p95Ms: Math.ceil(values[Math.ceil(values.length * .95) - 1]), maxMs: Math.ceil(values.at(-1)), bajoUnSegundo: values.filter(v => v < 1000).length }));
   }
 });
+
+test('carga mixta de portería durante un minuto', { skip: process.env.RUN_PEAK_TEST !== '1' }, async () => {
+  const db = getDatabase(seedApp);
+  const guards = [];
+  const updates = {};
+  for (let lane = 0; lane < 3; lane++) {
+    const id = 'peak-guard-' + lane;
+    const email = id + '@example.test';
+    const auth = await getAuth(seedApp).createUser({ email, password: 'IntegrationPass123!' });
+    await db.ref().update({
+      ['guards/' + id]: { name: id, authUid: auth.uid, active: true },
+      ['portalProfiles/' + auth.uid]: { role: 'guard', id, active: true },
+      ['guardShifts/' + id]: { guardId: id, active: true, startTimestamp: Date.now() }
+    });
+    guards.push(await loginAs(email));
+    for (let round = 0; round < 60; round++) {
+      updates['students/peak-' + lane + '-' + round] = { name: 'Visita sintética', active: true, sede: 'Prueba', tipoUsuario: 'estudiante' };
+    }
+  }
+  const admin = await loginAs('admin.integration@example.test');
+  await db.ref().update(updates);
+  const historyFixtureCount = 8401;
+  const fixtureStart = Date.now() - 86400000;
+  for (let offset = 0; offset < historyFixtureCount; offset += 500) {
+    const batch = {};
+    for (let i = offset; i < Math.min(offset + 500, historyFixtureCount); i++) {
+      batch['seed-' + i] = { id: 'fixture-' + i, name: 'Persona sintética', timestamp: fixtureStart + i * 1000,
+        sede: 'Prueba', tipoUsuario: 'estudiante', authorized: true, accessType: 'entry' };
+    }
+    await db.ref('accessHistory').update(batch);
+  }
+  const measurements = { validation: [], history: [] };
+  const statuses = {};
+  async function timed(kind, call) {
+    const start = performance.now();
+    const response = await call();
+    measurements[kind].push(performance.now() - start);
+    if (kind === 'history' && response.response.ok) {
+      assert.equal(response.body.data.length, 25);
+      assert.ok(response.body.nextCursor);
+    }
+    const key = kind + '-' + response.response.status;
+    statuses[key] = (statuses[key] || 0) + 1;
+  }
+  const start = performance.now();
+  for (let round = 0; round < 60; round++) {
+    await delay(Math.max(0, start + 1000 * round - performance.now()));
+    await Promise.all([
+      ...guards.map((headers, lane) => timed('validation', () => validate(headers, signedQr('peak-' + lane + '-' + round)))),
+      timed('history', () => request('/portal/history?limit=25', { headers: admin }))
+    ]);
+  }
+  const elapsedMs = Math.round(performance.now() - start);
+  const events = Object.values((await db.ref('accessHistory').get()).val() || {}).filter(e => e.studentUid?.startsWith('peak-'));
+  const timings = Object.fromEntries(Object.entries(measurements).map(([kind, values]) => {
+    values.sort((a,b) => a-b);
+    return [kind, { n: values.length, p95Ms: Math.ceil(values[Math.ceil(values.length * .95)-1]), maxMs: Math.ceil(values.at(-1)) }];
+  }));
+  console.log('PEAK', JSON.stringify({ historyFixtureCount, elapsedMs, statuses, timings, auditEvents: events.length }));
+  assert.deepEqual(statuses, { 'validation-200': 180, 'history-200': 60 });
+  assert.equal(events.length, 180);
+  const expected = new Set(Object.keys(updates).map(key => key.split('/')[1]));
+  for (const e of events) {
+    assert.ok(expected.delete(e.studentUid));
+    assert.equal(e.guardId, 'peak-guard-' + e.studentUid.split('-')[1]);
+    assert.equal(e.authorized, true);
+    assert.equal(e.accessType, 'entry');
+  }
+  assert.equal(expected.size, 0);
+});

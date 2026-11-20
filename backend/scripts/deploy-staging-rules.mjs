@@ -16,16 +16,30 @@ function comparableRules(rules) {
     key === '.indexOn' && Array.isArray(value) ? [...value].sort() : value));
 }
 const desired = JSON.parse(await readFile(resolve('database.rules.json'), 'utf8'));
+// The remote privacy drill uses an isolated subtree. Only staging needs these indexes.
+const baseRules = structuredClone(desired);
+desired.rules.privacyTestRuns = {
+  '$run': {
+    accessHistory: { '.indexOn': ['timestamp', 'id'] },
+    adminAuditLog: { '.indexOn': ['entityId'] }
+  }
+};
 if (desired.rules['.read'] !== false || desired.rules['.write'] !== false) throw new Error('Default deny required.');
 const app = initializeApp({ projectId, databaseURL, credential: cert(serviceAccount) }, 'staging-rules');
 try {
   const db = getDatabase(app);
   const previous = await db.getRulesJSON();
-  if (process.argv.includes('--apply')) {
+  if (process.argv.includes('--add-drill-indexes') &&
+      !isDeepStrictEqual(comparableRules(previous), comparableRules(desired)) &&
+      !isDeepStrictEqual(comparableRules(previous), comparableRules(baseRules))) {
+    throw new Error('Unexpected staging rules; isolated drill index update aborted.');
+  }
+  if (process.argv.includes('--apply') || process.argv.includes('--add-drill-indexes')) {
     const directory = resolve('output', 'rules-backups');
     await mkdir(directory, { recursive: true });
     const backup = resolve(directory, `staging-${Date.now()}.json`);
     await writeFile(backup, JSON.stringify(previous, null, 2), { flag: 'wx' });
+    if (!isDeepStrictEqual(await db.getRulesJSON(), previous)) throw new Error('Staging rules changed during review.');
     await db.setRules(desired);
     console.log(`Previous rules backed up: ${backup}`);
   }
@@ -37,5 +51,5 @@ try {
     if (![401, 403].includes(response.status)) throw new Error(`Anonymous access was not denied: ${path}`);
   }
   await db.ref('accessState').orderByChild('_pendingAccess/status').equalTo('pending').limitToFirst(1).get();
-  console.log(JSON.stringify({ projectId, rulesMatch: true, anonymousReadsDenied: true, recoveryQuery: 'ok', applied: process.argv.includes('--apply') }));
+  console.log(JSON.stringify({ projectId, rulesMatch: true, anonymousReadsDenied: true, recoveryQuery: 'ok', applied: process.argv.includes('--apply') || process.argv.includes('--add-drill-indexes') }));
 } finally { await deleteApp(app); }
