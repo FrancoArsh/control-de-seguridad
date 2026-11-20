@@ -532,11 +532,21 @@ test('KPI de decisión HTTP en portería con credenciales sintéticas', async ()
   }
 });
 
-test('carga mixta de portería durante un minuto', { skip: process.env.RUN_PEAK_TEST !== '1' }, async () => {
+test('carga mixta con dos guardias y un administrador', { skip: process.env.RUN_PEAK_TEST !== '1' }, async () => {
   const db = getDatabase(seedApp);
+  // Reported reference: 396 movements per hour at two entrances. The distribution
+  // within that hour is unknown. Model simultaneous pairs, each handled by its own guard.
+  const referenceVolume = 396;
+  const laneCount = 2;
+  const sampleSize = Number(process.env.PEAK_SAMPLE_MOVEMENTS || referenceVolume);
+  const speedup = Number(process.env.PEAK_SPEEDUP || 1);
+  assert.ok(Number.isInteger(sampleSize) && sampleSize > 0 && sampleSize <= referenceVolume);
+  assert.ok(Number.isFinite(speedup) && speedup >= 1 && speedup <= 60);
+  const rounds = Math.ceil(sampleSize / laneCount);
+  const intervalMs = 3600000 * laneCount / referenceVolume / speedup;
   const guards = [];
   const updates = {};
-  for (let lane = 0; lane < 3; lane++) {
+  for (let lane = 0; lane < laneCount; lane++) {
     const id = 'peak-guard-' + lane;
     const email = id + '@example.test';
     const auth = await getAuth(seedApp).createUser({ email, password: 'IntegrationPass123!' });
@@ -546,7 +556,8 @@ test('carga mixta de portería durante un minuto', { skip: process.env.RUN_PEAK_
       ['guardShifts/' + id]: { guardId: id, active: true, startTimestamp: Date.now() }
     });
     guards.push(await loginAs(email));
-    for (let round = 0; round < 60; round++) {
+    for (let round = 0; round < rounds; round++) {
+      if (round * laneCount + lane >= sampleSize) break;
       updates['students/peak-' + lane + '-' + round] = { name: 'Visita sintética', active: true, sede: 'Prueba', tipoUsuario: 'estudiante' };
     }
   }
@@ -576,22 +587,23 @@ test('carga mixta de portería durante un minuto', { skip: process.env.RUN_PEAK_
     statuses[key] = (statuses[key] || 0) + 1;
   }
   const start = performance.now();
-  for (let round = 0; round < 60; round++) {
-    await delay(Math.max(0, start + 1000 * round - performance.now()));
+  for (let round = 0; round < rounds; round++) {
+    await delay(Math.max(0, start + intervalMs * round - performance.now()));
     await Promise.all([
-      ...guards.map((headers, lane) => timed('validation', () => validate(headers, signedQr('peak-' + lane + '-' + round)))),
+      ...guards.slice(0, Math.min(laneCount, sampleSize - round * laneCount)).map((headers, lane) => timed('validation', () => validate(headers, signedQr('peak-' + lane + '-' + round)))),
       timed('history', () => request('/portal/history?limit=25', { headers: admin }))
     ]);
   }
+  await delay(Math.max(0, start + sampleSize * 3600000 / referenceVolume / speedup - performance.now()));
   const elapsedMs = Math.round(performance.now() - start);
   const events = Object.values((await db.ref('accessHistory').get()).val() || {}).filter(e => e.studentUid?.startsWith('peak-'));
   const timings = Object.fromEntries(Object.entries(measurements).map(([kind, values]) => {
     values.sort((a,b) => a-b);
     return [kind, { n: values.length, p95Ms: Math.ceil(values[Math.ceil(values.length * .95)-1]), maxMs: Math.ceil(values.at(-1)) }];
   }));
-  console.log('PEAK', JSON.stringify({ historyFixtureCount, elapsedMs, statuses, timings, auditEvents: events.length }));
-  assert.deepEqual(statuses, { 'validation-200': 180, 'history-200': 60 });
-  assert.equal(events.length, 180);
+  console.log('PEAK', JSON.stringify({ referenceVolume, laneCount, sampleSize, speedup, historyFixtureCount, elapsedMs, statuses, timings, auditEvents: events.length }));
+  assert.deepEqual(statuses, { 'validation-200': sampleSize, 'history-200': rounds });
+  assert.equal(events.length, sampleSize);
   const expected = new Set(Object.keys(updates).map(key => key.split('/')[1]));
   for (const e of events) {
     assert.ok(expected.delete(e.studentUid));

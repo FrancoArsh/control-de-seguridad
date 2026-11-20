@@ -60,6 +60,20 @@ La retención y la restauración comienzan siempre en modo `preview`; `--apply=t
 - Operación de datos: salida de `npm run emulator:ops`, que comprueba respaldo redactado, preview y borrado controlado.
 - Recuperación: salida de `npm run emulator:recovery`, que comprueba preview sin cambios y rotación efectiva de token y PIN.
 
+### Ensayo mixto de portería
+
+La referencia comunicada fue de 396 movimientos en una hora y hasta dos guardias, uno por entrada. El minuto de mayor demanda y la distribución por entrada están pendientes de medición. Para el escenario se modelan todos los movimientos como ingresos, dos validaciones concurrentes por ronda y una consulta administrativa de 25 filas. Se precargan 8.401 movimientos sintéticos. Los guardias usan cuentas y turnos distintos.
+
+Desde `backend`, compilar y activar `RUN_PEAK_TEST=1`. Ejecutar `firebase emulators:exec --only "database,auth" --project demo-control-seguridad "node --test --test-name-pattern=mixta test/integration.test.mjs"`. Las variables de entorno siguientes controlan el ensayo:
+
+| Ensayo | PEAK_SAMPLE_MOVEMENTS | PEAK_SPEEDUP | Duración nominal |
+|---|---:|---:|---:|
+| Muestra al promedio comunicado | 33 | 1 | 5 minutos |
+| Hora completa al promedio comunicado | 396 | 1 | 60 minutos |
+| Volumen horario comprimido | 396 | 60 | 1 minuto |
+
+La salida PEAK informa la duración observada, estados HTTP, P95 y máximo por operación. La prueba exige una entrada autorizada por persona, sin duplicados, y la coincidencia del guardia en cada registro. El cronómetro HTTP empieza al enviar la solicitud y termina tras leer su respuesta. El escenario representa una distribución supuesta, sin intervención de cámara física.
+
 ## Riesgos abiertos
 
 - La base de datos de producción debe definir reglas y roles junto con TI y privacidad.
